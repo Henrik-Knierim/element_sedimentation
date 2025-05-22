@@ -6,4 +6,7 @@ Copy `helium_rain.f90` and `Schötter+2018.csv` into the `src` directory your ME
 
 Next, add the compiling info of `helium_rain.f90` to your makefile. An example of how to do this can be found in `makefile` in this repo.
 
-## Description
+## Details
+The code computes an array $dY$, that is the change in the helium mass fraction due to sedimentation. Once obtained, the mass abundances are changed according to
+$$dX_i = \frac{- dY}{1-Y} X_i$$
+where $X_i$ is the mass fraction of the $i$-th chemical species and $Y$ is the helium mass fraction.

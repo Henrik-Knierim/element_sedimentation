@@ -18,6 +18,7 @@
 
 # Fortran module files
 *.mod
+!1_M_J_9_kb_per_mu.mod
 *.smod
 
 # Compiled Static libraries
@@ -30,3 +31,12 @@
 *.exe
 *.out
 *.app
+
+# Henrik's additional files
+*.code-workspace
+star
+png
+photos
+LOGS
+.mesa_temp_cache
+*.yml

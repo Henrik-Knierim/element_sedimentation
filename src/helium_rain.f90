@@ -9,14 +9,31 @@ module helium_rain
 
    implicit none
 
+   private
+
+   public :: init_helium_rain
+   public :: free_phase_diagram
+   public :: do_helium_rain
+   public :: determine_precipitating_regions
+   public :: instant_rain
+   public :: bottom_up_rain
+   public :: advection_diffusion_rain
+   public :: phase_diagram
+   public :: immiscibility_region
+   public :: helium_immiscibility_phase_diagram
+
    integer, parameter :: instant_rain = 0
-   integer, parameter :: constant_velocity_rain = 1
-   integer, parameter :: advenction_equation_rain = 2
+   integer, parameter :: bottom_up_rain = 1
+   integer, parameter :: advection_diffusion_rain = 2
 
    real(dp), parameter :: tiny = 1d-10
    real(dp), parameter :: small = 1d-4
 
    real(kind=dp) :: gentle_mixing_maximum_helium_rain_dY ! maximum change allowed in the helium mass fraction
+   integer :: i_Y = -1
+
+   ! TODO: make this a stand-alone module that can call other star modules
+   ! TODO: once done, implement the _update method.
 
    type phase_diagram
       character(len=1024) :: phase_diagram_filename
@@ -31,18 +48,17 @@ module helium_rain
       integer :: klo, khi  ! the precipitating region
       integer :: k_reservoir_lo, k_reservoir_hi  ! the convective helium reservoir
       integer :: k_deposite_lo, k_deposite_hi  ! the region where the helium is deposited
-      real(kind=dp), allocatable :: dX(:), dY(:), dZ(:) ! the change in mass fractions
+      real(kind=dp), allocatable :: dY(:) ! change in the mass fractions
    end type immiscibility_region
 
    type(phase_diagram) :: helium_immiscibility_phase_diagram
    logical :: phase_diagram_loaded = .false.
 
 
-
-
 contains
 
-   subroutine init_helium_rain(phase_diagram_filename, maximum_dY_change_per_step, ierr)
+   subroutine init_helium_rain(s, phase_diagram_filename, maximum_dY_change_per_step, ierr)
+      type (star_info), pointer :: s
       character(len=*), intent(in) :: phase_diagram_filename
       real(kind=dp), intent(in) :: maximum_dY_change_per_step
       integer, intent(out) :: ierr
@@ -68,7 +84,7 @@ contains
       if (ierr /= 0) return
 
       if (verbose) call print_phase_diagram(helium_immiscibility_phase_diagram)
-
+      
    end subroutine init_helium_rain
 
    subroutine do_helium_rain(s,  method, ierr)
@@ -78,6 +94,8 @@ contains
       integer, intent(out) :: ierr
 
       ierr = 0 ! 0 means AOK
+
+      if (i_Y == -1) i_Y = s% net_iso(chem_get_iso_id('he4'))
 
       ! check that method is valid (currently, we only implemented instant rain)
       if (method /= instant_rain) then
@@ -89,10 +107,10 @@ contains
       select case (method)
        case (instant_rain)
          call do_instant_rain(s, ierr)
-       case (constant_velocity_rain)
-         ! call do_constant_velocity_rain(s, ierr)
-       case (advenction_equation_rain)
-         ! call do_advection_equation_rain(s, ierr)
+       case (bottom_up_rain)
+         call do_bottom_up_rain(s, ierr)
+       case (advection_diffusion_rain)
+         call do_advection_diffusion_rain(s, ierr)
        case default
          ierr = 1
          write(*,*) 'do_helium_rain: unknown method for helium rain'
@@ -101,12 +119,151 @@ contains
 
    end subroutine do_helium_rain
 
+   subroutine do_advection_diffusion_rain(s, ierr)
+      type (star_info), pointer :: s
+      integer, intent(out) :: ierr
+   
+      ierr = 0 ! 0 means AOK
+
+      ! the steps are somewhat clear:
+      ! 1. Find the regions that are precipitating,
+      ! 2. Give them a non-zero v_settle, 
+      ! 3. and run your solver
+
+   end subroutine do_advection_diffusion_rain
+
+   subroutine do_bottom_up_rain(s,  ierr)
+      type (star_info), pointer :: s
+      integer :: i
+      integer, intent(out) :: ierr
+
+      logical :: verbose = .true.
+
+      integer, parameter :: max_iterations = 10000
+      integer :: j
+      integer :: klo, khi
+
+      ! debugging
+      logical :: debug = .false.
+      integer :: k_debug
+      real(kind=dp), allocatable :: xa_pre(:,:)
+      real(kind=dp) :: X, Y, Z
+
+      type(immiscibility_region), allocatable :: precipitating_regions(:)
+
+      include 'formats'
+
+      ierr = 0 ! 0 means AOK
+
+      allocate(xa_pre(size(s%xa, 1), size(s%xa, 2)))
+
+      do j=1, max_iterations
+         
+         if (verbose) write(*,*) 'do_instant_rain: iteration: ', j
+         xa_pre = s%xa
+
+         ! determine the precipitating region
+         call determine_precipitating_regions(s, precipitating_regions, ierr)
+         if (ierr /= 0) return
+         if (.not. allocated(precipitating_regions)) then
+            if (verbose) write(*,1) 'do_instant_rain: no precipitating region found.'
+            return
+         end if
+
+         ! determine the upper convective helium reservoir
+         call determine_top_reservoirs(s, precipitating_regions, ierr)
+         if (ierr /= 0) then
+            write(*,*) 'do_instant_rain: error in determine_top_reservoirs'
+            return
+         endif
+
+         ! determine deposit region
+         call determine_helium_deposites(s, precipitating_regions, ierr)
+         if (ierr /= 0) then
+            write(*,*) 'do_instant_rain: error in determine_helium_deposites'
+            return
+         endif
+
+         call check_precipitating_regions(precipitating_regions, ierr)
+         if (ierr /= 0) then
+            write(*,*) 'do_instant_rain: error in check_precipitating_regions'
+            return
+         endif
+
+         do i = 1, size(precipitating_regions)
+
+            ! the differnce to instant rain: we change the abundances cell-by-cell
+            klo = precipitating_regions(i)% klo
+            khi = precipitating_regions(i)% khi
+            
+            ! as long as we are raining down, we don't need to determine the top reservoir
+            ! case 1: We are inside the raining region (klo /= khi)
+            ! Set all changes in dY except the lowest cell equal to zero
+            ! no need to adjust the top reservoir (yet)
+            if (klo /= khi) then
+               precipitating_regions(i)%dY(1:khi-1) = 0d0
+            else
+               ! case 2: We are at the top of the raining region (klo == khi)
+               ! Adjust the top reservoir accordingly
+               call set_top_reservoir_abundance_change(s,  precipitating_regions(i), ierr)
+               if (ierr /= 0) then
+                  write(*,*) 'do_instant_rain: error in set_top_reservoir_abundance_change'
+                  return
+               endif
+            end if
+
+            call set_Helium_deposit_region_abundance_change(s,  precipitating_regions(i), ierr)
+            if (ierr /= 0) then
+               write(*,*) 'do_instant_rain: error in set_Helium_deposit_region_abundance_change'
+               return
+            endif
+
+            if ( debug ) then
+               do k_debug = 1, s%nz
+                  call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
+                  write(*,2) 'do_instant_rain: (k, X, Y, Z, dY): ', &
+                     k_debug, X, Y, Z, &
+                     precipitating_regions(i)%dY(k_debug)
+               end do
+            end if
+
+            call adjust_mass_fractions(s, precipitating_regions(i))
+
+            if ( debug ) then
+               write(*,*) 'do_instant_rain: after setting the abundances:'
+               do k_debug = 1, s%nz
+                  call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
+                  write(*,2) 'do_instant_rain: (k, X, Y, Z): ', &
+                     k_debug, X, Y, Z
+               end do
+            end if
+
+            ! check mass fraction conservation
+            if ( debug ) then
+               call monitor_mass_fractions(s,  precipitating_regions(i), ierr)
+            end if
+
+         end do
+
+         call check_after_rain(s, precipitating_regions, xa_pre, ierr)
+         deallocate(precipitating_regions)
+
+         if ( verbose ) then
+            k_debug = maxloc(abs(s%xa(i_Y, 1:s%nz)-xa_pre(i_Y, 1:s%nz)), dim=1)
+            if (verbose) write(*,*) 'maximum difference: (k, val)', k_debug,  abs(s%xa(i_Y, k_debug)-xa_pre(i_Y, k_debug))
+         end if
+         if (all(abs(s%xa(i_Y, 1:s%nz)-xa_pre(i_Y,1:s%nz)) < small)) exit
+
+      end do
+      deallocate(xa_pre)
+   
+   end subroutine do_bottom_up_rain
+
    subroutine do_instant_rain(s, ierr)
       type (star_info), pointer :: s
       integer :: i
       integer, intent(out) :: ierr
 
-      integer :: i_X, i_Y, i_Z
       logical :: verbose = .true.
 
       integer, parameter :: max_iterations = 1000
@@ -116,16 +273,13 @@ contains
       logical :: debug = .false.
       integer :: k_debug
       real(kind=dp), allocatable :: xa_pre(:,:)
+      real(kind=dp) :: X, Y, Z
 
       type(immiscibility_region), allocatable :: precipitating_regions(:)
 
       include 'formats'
 
       ierr = 0 ! 0 means AOK
-
-      i_X = s%net_iso(chem_get_iso_id('h1'))
-      i_Y = s%net_iso(chem_get_iso_id('he4'))
-      i_Z = s%net_iso(chem_get_iso_id('o16'))
 
       allocate(xa_pre(size(s%xa, 1), size(s%xa, 2)))
 
@@ -178,22 +332,21 @@ contains
 
             if ( debug ) then
                do k_debug = 1, s%nz
-                  write(*,2) 'do_instant_rain: (k, X, Y, Z, dX, dY, dZ): ', &
-                     k_debug, s%xa(i_X, k_debug), s%xa(i_Y, k_debug), s%xa(i_Z, k_debug), &
-                     precipitating_regions(i)%dX(k_debug), precipitating_regions(i)%dY(k_debug), precipitating_regions(i)%dZ(k_debug)
+                  call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
+                  write(*,2) 'do_instant_rain: (k, X, Y, Z, dY): ', &
+                     k_debug, X, Y, Z, &
+                     precipitating_regions(i)%dY(k_debug)
                end do
             end if
 
-            ! set new abundances mass fraction
-            s%xa(i_X, 1:s%nz) = s%xa(i_X, 1:s%nz) +  precipitating_regions(i) % dX(1:s%nz)
-            s%xa(i_Y, 1:s%nz) = s%xa(i_Y, 1:s%nz) +  precipitating_regions(i) % dY(1:s%nz)
-            s%xa(i_Z, 1:s%nz) = s%xa(i_Z, 1:s%nz) +  precipitating_regions(i) % dZ(1:s%nz)
+            call adjust_mass_fractions(s, precipitating_regions(i))
 
             if ( debug ) then
                write(*,*) 'do_instant_rain: after setting the abundances:'
                do k_debug = 1, s%nz
-                  write(*,2) 'do_instant_rain: (k, X, Y, Z, dX, dY, dZ): ', &
-                     k_debug, s%xa(i_X, k_debug), s%xa(i_Y, k_debug), s%xa(i_Z, k_debug)
+                  call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
+                  write(*,2) 'do_instant_rain: (k, X, Y, Z): ', &
+                     k_debug, X, Y, Z
                end do
             end if
 
@@ -225,49 +378,53 @@ contains
       real(kind=dp), allocatable, intent(in) :: xa_pre(:,:)
       integer, intent(out) :: ierr
 
-      integer :: i, k
+      integer :: i, k, j
       integer :: klo, khi
-      integer :: i_X, i_Y, i_Z
       integer :: k_debug
       real(kind=dp) :: dY_max
       include 'formats'
-
-      i_X = s%net_iso(chem_get_iso_id('h1'))
-      i_Y = s%net_iso(chem_get_iso_id('he4'))
-      i_Z = s%net_iso(chem_get_iso_id('o16'))
 
       ! test that the helium mass fraction is monotonically increasing and the X and Z mass fractions are monotonically decreasing
       ! in the precipitating region
       do i = 1, size(precipitating_regions)
          klo = precipitating_regions(i)%klo
          khi = precipitating_regions(i)%khi
+         !$OMP PARALLEL DO PRIVATE(k, j) SCHEDULE(guided)
          do k = klo, khi-1
-            if (s%xa(i_X, k) + small < s%xa(i_X, k+1) .and. xa_pre(i_X, k) > xa_pre(i_X, k+1)) then
-               ierr = 1
-               write(*,*) 'check_after_rain: X is not monotonically decreasing'
-               write(*,3) 'klo, khi: ', klo, khi
-               write(*,2) 'k, X_pre(k), Y_pre(k), Z_pre(k): ', k, xa_pre(i_X, k), xa_pre(i_Y, k), xa_pre(i_Z, k)
-               write(*,2) 'k, X(k), Y(k), Z(k): ', k, s%xa(i_X, k), s%xa(i_Y, k), s%xa(i_Z, k)
-               write(*,2) 'k, X_pre(k+1), Y_pre(k+1), Z_pre(k+1): ', k, xa_pre(i_X, k+1), xa_pre(i_Y, k+1), xa_pre(i_Z, k+1)
-               write(*,2) 'k, X(k+1), Y(k+1), Z(k+1): ', k, s%xa(i_X, k+1), s%xa(i_Y, k+1), s%xa(i_Z, k+1)
-            end if
 
-            if (s%xa(i_Y, k) - small > s%xa(i_Y, k+1)) then
-               ierr = 1
-               write(*,*) 'check_after_rain: Y is not monotonically increasing'
-               write(*,*) 'klo, khi: ', klo, khi
-               write(*,*) 'k, Y(k), Y(k+1): ', k, s%xa(i_Y, k), s%xa(i_Y, k+1)
-               write(*,*) 'k, Y_pre(k), Y_pre(k+1): ', k, xa_pre(i_Y, k), xa_pre(i_Y, k+1)
-            end if
+         if (s%xa(i_Y, k) - small > s%xa(i_Y, k+1)) then
+            ierr = 1
+            write(*,*) 'check_after_rain: Y is not monotonically increasing'
+            write(*,*) 'klo, khi: ', klo, khi
+            write(*,*) 'k, Y(k), Y(k+1): ', k, s%xa(i_Y, k), s%xa(i_Y, k+1)
+            write(*,*) 'k, Y_pre(k), Y_pre(k+1): ', k, xa_pre(i_Y, k), xa_pre(i_Y, k+1)
+         end if
 
-            if (s%xa(i_Z, k) + small < s%xa(i_Z, k+1) .and. xa_pre(i_Z, k) > xa_pre(i_Z, k+1)) then
-               ierr = 1
-               write(*,*) 'check_after_rain: Z is not monotonically decreasing'
-               write(*,*) 'klo, khi: ', klo, khi
-               write(*,*) 'k, Z(k), Z(k+1): ', k, s%xa(i_Z, k), s%xa(i_Z, k+1)
-               write(*,*) 'k, Z_pre(k), Z_pre(k+1): ', k, xa_pre(i_Z, k), xa_pre(i_Z, k+1)
+         do j = 1, i_Y - 1
+            if (s%xa(j, k) + small < s%xa(j, k+1) .and. xa_pre(j, k) > xa_pre(j, k+1)) then
+            ierr = 1
+            write(*,*) 'check_after_rain: X_i is not monotonically decreasing for i = ', j
+            write(*,*) 'klo, khi: ', klo, khi
+            write(*,2) 'k, X_i(k): ', k, s% xa(j, k)
+            write(*,2) 'k, X_i(k+1): ', k, s% xa(j, k+1)
+            write(*,2) 'k, X_i_pre(k): ', k, xa_pre(j, k)
+            write(*,2) 'k, X_i_pre(k+1): ', k, xa_pre(j, k+1)
             end if
          end do
+
+         do j = i_Y + 1, s%species
+            if (s%xa(j, k) + small < s%xa(j, k+1) .and. xa_pre(j, k) > xa_pre(j, k+1)) then
+            ierr = 1
+            write(*,*) 'check_after_rain: X_i is not monotonically decreasing for i = ', j
+            write(*,*) 'klo, khi: ', klo, khi
+            write(*,2) 'k, X_i(k): ', k, s% xa(j, k)
+            write(*,2) 'k, X_i(k+1): ', k, s% xa(j, k+1)
+            write(*,2) 'k, X_i_pre(k): ', k, xa_pre(j, k)
+            write(*,2) 'k, X_i_pre(k+1): ', k, xa_pre(j, k+1)
+            end if
+         end do
+         end do
+         !$OMP END PARALLEL DO
 
          ! check that Y in the top reservoir either decreases or stays the same
          if (any(s%xa(i_Y, precipitating_regions(i)%k_reservoir_lo:precipitating_regions(i)%k_reservoir_hi) - small > xa_pre(i_Y, precipitating_regions(i)%k_reservoir_lo:precipitating_regions(i)%k_reservoir_hi))) then
@@ -302,7 +459,7 @@ contains
       ! local
       real(kind=dp) :: M_deposite, M_rain
       integer :: k_reservoir_lo, k_reservoir_hi, k_deposite_lo, k_deposite_hi
-      real(kind=dp), allocatable :: dX(:), dY(:), dZ(:)
+      real(kind=dp), allocatable :: dY(:)
       integer :: klo, khi
 
 
@@ -315,10 +472,8 @@ contains
       khi = precipitating_region%khi
 
       ! allocate the mass fraction changes
-      allocate(dX(1:s%nz), dY(1:s%nz), dZ(1:s%nz), source=0d0)
-      dX(1:s%nz) = precipitating_region%dX(1:s%nz)
+      allocate(dY(1:s%nz), source=0d0)
       dY(1:s%nz) = precipitating_region%dY(1:s%nz)
-      dZ(1:s%nz) = precipitating_region%dZ(1:s%nz)
 
       M_rain = sum(s%dm(k_reservoir_lo:khi))
       M_deposite = sum(s%dm(k_deposite_lo:k_deposite_hi))
@@ -326,24 +481,15 @@ contains
       write(*,*) 'Helium rain convergence test:'
       write(*,*) '----------------------------------------'
       write(*,*) 'rain region: ', k_reservoir_lo, k_reservoir_hi, klo, khi
-      write(*,*) 'integrated dX_rain/mstar: ', dot_product(s%dm(k_reservoir_lo:khi), dX(k_reservoir_lo:khi))/M_rain
       write(*,*) 'integrated dY_rain/mstar: ', dot_product(s%dm(k_reservoir_lo:khi), dY(k_reservoir_lo:khi))/M_rain
-      write(*,*) 'integrated dZ_rain/mstar: ', dot_product(s%dm(k_reservoir_lo:khi), dZ(k_reservoir_lo:khi))/M_rain
-      write(*,*) 'do_instant_rain: integrated (dZ + dY+ dZ)/M_rain: ', dot_product(s%dm(k_reservoir_lo:khi), dX(k_reservoir_lo:khi) + dY(k_reservoir_lo:khi)+ dZ(k_reservoir_lo:khi))/M_rain
       write(*,*) ''
       write(*,*) 'depositing region: ', k_deposite_lo, k_deposite_hi
-      write(*,*) 'do_instant_rain: integrated dX/M_deposite: ', dot_product(s%dm(k_deposite_lo:k_deposite_hi), dX(k_deposite_lo:k_deposite_hi))/M_deposite
       write(*,*) 'do_instant_rain: integrated dY/M_deposite: ', dot_product(s%dm(k_deposite_lo:k_deposite_hi), dY(k_deposite_lo:k_deposite_hi))/M_deposite
-      write(*,*) 'do_instant_rain: integrated dZ/M_deposite: ', dot_product(s%dm(k_deposite_lo:k_deposite_hi), dZ(k_deposite_lo:k_deposite_hi))/M_deposite
-      write(*,*) 'do_instant_rain: integrated (dZ + dY+ dZ)/M_deposite: ', dot_product(s%dm(k_deposite_lo:k_deposite_hi), dX(k_deposite_lo:k_deposite_hi)+ dY(k_deposite_lo:k_deposite_hi)+ dZ(k_deposite_lo:k_deposite_hi))/M_deposite
       write(*,*) ''
       write(*,*) 'full region: ', 1, s%nz
-      write(*,*) 'do_instant_rain: integrated dX/mstar: ', dot_product(s%dm(1:s%nz), dX(1:s%nz))/s%mstar
       write(*,*) 'do_instant_rain: integrated dY/mstar: ', dot_product(s%dm(1:s%nz), dY(1:s%nz))/s%mstar
-      write(*,*) 'do_instant_rain: integrated dZ/mstar: ', dot_product(s%dm(1:s%nz), dZ(1:s%nz))/s%mstar
-      write(*,*) 'do_instant_rain: integrated (dZ + dY+ dZ)/mstar: ', dot_product(s%dm(1:s%nz), dX(1:s%nz)+ dY(1:s%nz)+ dZ(1:s%nz))/s%mstar
       write(*,*) '----------------------------------------'
-      deallocate(dX, dY, dZ)
+      deallocate(dY)
    end subroutine monitor_mass_fractions
 
    subroutine dummy_get_precipitating_bounds(s,  klo, khi, n_precipitating_regions, dY)
@@ -432,6 +578,38 @@ contains
 
    end subroutine enforce_helium_gradient
 
+   subroutine get_raw_miscibility(s, is_miscible, Y_miscible,  ierr)
+      ! miscibility without any post-processing
+      type(star_info), pointer :: s
+      real(kind=dp), allocatable, intent(out) :: Y_miscible(:)
+      logical, allocatable, intent(out) :: is_miscible(:)  ! miscible regions
+      
+      ! local vars
+      real(kind=dp), allocatable :: Y(:)
+      integer :: k
+      integer :: op_err, ierr
+
+      ierr = 0 ! 0 means AOK
+      ! set up arrays
+      allocate(Y_miscible(s%nz), Y(s%nz), is_miscible(s%nz))
+
+      ! if i_Y is not set (=-1), call chem_get_iso_id('he4') to get the index
+      if (i_Y == -1) i_Y = s% net_iso(chem_get_iso_id('he4'))
+      
+      ! shorthand for the helium mass fraction
+      Y = s% xa(i_Y, 1:s%nz)
+
+      !$OMP PARALLEL DO PRIVATE(k, op_err) SCHEDULE(guided)
+      do k = 1, s%nz
+         op_err = 0  ! Each thread gets its own local copy of ierr
+         call Y_is_miscible(s%lnPgas(k), s%lnT(k), Y(k), is_miscible(k), Y_miscible(k), helium_immiscibility_phase_diagram, op_err)
+         if (op_err /= 0) ierr = op_err
+      end do
+      !$OMP END PARALLEL DO
+      if (ierr /= 0) return
+      
+   end subroutine get_raw_miscibility
+
    subroutine get_precipitating_bounds(s, klo, khi, n_precipitating_regions, dY, ierr)
       type (star_info), pointer :: s
       integer, allocatable, intent(out) :: klo(:), khi(:)  ! bounds of the precipitating regions
@@ -442,7 +620,6 @@ contains
       ! local
       integer, allocatable :: klo_dummy(:), khi_dummy(:)
       integer :: k, i, op_err
-      integer :: i_Y
       real(kind=dp), allocatable :: Y_miscible(:), Y(:)
       logical, allocatable :: is_miscible(:)  ! miscible regions
 
@@ -459,8 +636,10 @@ contains
       ! set up arrays
       allocate(Y_miscible(s%nz), Y(s%nz), is_miscible(s%nz))
 
+      ! if i_Y is not set (=-1), call chem_get_iso_id('he4') to get the index
+      if (i_Y == -1) i_Y = s% net_iso(chem_get_iso_id('he4'))
+      
       ! shorthand for the helium mass fraction
-      i_Y = s%net_iso(chem_get_iso_id('he4'))
       Y = s%xa(i_Y, 1:s%nz)
 
       !$OMP PARALLEL DO PRIVATE(k, op_err) SCHEDULE(guided)
@@ -669,7 +848,6 @@ contains
       type (star_info), pointer :: s
       type (immiscibility_region), allocatable, intent(out) :: precipitating_regions(:)
       integer :: i, k, n_precipitating_regions
-      integer :: i_X, i_Y, i_Z
 
       ! precipitating region vars
       integer, allocatable :: klo(:), khi(:)
@@ -679,13 +857,11 @@ contains
       integer, intent(out) :: ierr
       logical :: verbose = .true.
       logical :: debug = .false.
+      real(kind=dp) :: X, Y, Z
       include 'formats'
 
       ierr = 0 ! 0 means AOK
 
-      i_X = s%net_iso(chem_get_iso_id('h1'))
-      i_Y = s%net_iso(chem_get_iso_id('he4'))
-      i_Z = s%net_iso(chem_get_iso_id('o16'))
 
       call get_precipitating_bounds(s, klo, khi, n_precipitating_regions, dY, ierr)
       ! call dummy_get_precipitating_bounds(s, klo, khi, n_precipitating_regions, dY)
@@ -703,12 +879,9 @@ contains
          precipitating_regions(i)%khi = khi(i)
 
          ! at this point, we haven't determined the top reservoir and the depositing region yet. Hence, we consider the largest possible region, setting it to zero everywhere.
-         allocate(precipitating_regions(i)%dX(1:s%nz), precipitating_regions(i)%dY(1:s%nz), precipitating_regions(i)%dZ(1:s%nz), source=0d0)
-
-         precipitating_regions(i)%dX(klo(i):khi(i)) = s%xa(i_X, klo(i):khi(i)) * (-1d0*dY(klo(i):khi(i)))/(1d0-s%xa(i_Y, klo(i):khi(i))) !(1d0/(1d0 + dY(klo(i):khi(i))) - 1d0)
+         allocate(precipitating_regions(i)%dY(1:s%nz), source=0d0)
 
          precipitating_regions(i)%dY(klo(i):khi(i)) = dY(klo(i):khi(i))
-         precipitating_regions(i)%dZ(klo(i):khi(i)) = - precipitating_regions(i)%dX(klo(i):khi(i)) - precipitating_regions(i)%dY(klo(i):khi(i))
 
       end do
       !$OMP END PARALLEL DO
@@ -717,8 +890,9 @@ contains
          do i = 1, n_precipitating_regions
             write(*,*) 'determine_precipitating_region: (i, klo, khi): ', i, klo(i), khi(i)
             do k = klo(i), khi(i)
-               write(*,*) 'determine_precipitating_region: (k, X, Y, Z, dX, dY, dZ): ', &
-                  i, k, s%xa(i_X, k), s%xa(i_Y, k), s%xa(i_Z, k), precipitating_regions(i)%dX(k), precipitating_regions(i)%dY(k), precipitating_regions(i)%dZ(k)
+               call get_mass_fractions(s, s% xa(:, k), X, Y, Z)
+               write(*,*) 'determine_precipitating_region: (k, X, Y, Z, dY): ', &
+                  i, k, X, Y, Z, precipitating_regions(i)%dY(k)
             end do
          end do
 
@@ -943,15 +1117,12 @@ contains
       type (star_info), pointer :: s
       type (immiscibility_region) :: precipitating_region
       integer, intent(out) :: ierr
-      integer :: i, i_X, i_Y
+      integer :: i
       real(kind=dp), allocatable :: Y_crit(:)
       logical, allocatable :: is_miscible(:)
       integer :: klo, k_reservoir_lo, k_reservoir_hi
       logical :: debug = .false.
       ierr = 0 ! 0 means AOK
-
-      i_X = s%net_iso(chem_get_iso_id('h1'))
-      i_Y = s%net_iso(chem_get_iso_id('he4'))
 
       k_reservoir_lo = precipitating_region%k_reservoir_lo
       k_reservoir_hi = precipitating_region%k_reservoir_hi
@@ -970,8 +1141,6 @@ contains
       end if
 
       precipitating_region%dY(k_reservoir_lo:k_reservoir_hi) = merge(0d0, Y_crit - s%xa(i_Y, k_reservoir_lo:k_reservoir_hi), s%xa(i_Y, k_reservoir_lo:k_reservoir_hi) < Y_crit(k_reservoir_lo:k_reservoir_hi))
-      precipitating_region%dX(k_reservoir_lo:k_reservoir_hi) = s%xa(i_X, k_reservoir_lo:k_reservoir_hi) *  (-1d0*precipitating_region%dY(k_reservoir_lo:k_reservoir_hi))/(1d0-s%xa(i_Y, k_reservoir_lo:k_reservoir_hi)) !(1d0/(1d0 + precipitating_region%dY(k_reservoir_lo:k_reservoir_hi)) - 1d0)
-      precipitating_region%dZ(k_reservoir_lo:k_reservoir_hi) = - precipitating_region%dX(k_reservoir_lo:k_reservoir_hi) - precipitating_region%dY(k_reservoir_lo:k_reservoir_hi)
       deallocate(Y_crit)
 
       if ( debug ) then
@@ -980,7 +1149,6 @@ contains
          write(*,*) 'set_top_reservoir_abundance_change: Y_crit(klo) = ', s%xa(i_Y, precipitating_region%klo) + precipitating_region%dY(precipitating_region%klo)
          write(*,*) 'set_top_reservoir_abundance_change: Y(k_reservoir_lo:k_reservoir_hi) = ', s%xa(i_Y, k_reservoir_lo:k_reservoir_hi)
          write(*,*) 'set_top_reservoir_abundance_change: dY(k_reservoir_lo:k_reservoir_hi) = ', precipitating_region%dY(k_reservoir_lo:k_reservoir_hi)
-         write(*,*) 'set_top_reservoir_abundance_change: dX(k_reservoir_lo:k_reservoir_hi) = ', precipitating_region%dX(k_reservoir_lo:k_reservoir_hi)
       end if
 
    end subroutine set_top_reservoir_abundance_change
@@ -991,7 +1159,7 @@ contains
       integer, intent(out) :: ierr
 
       ! local
-      real(kind=dp) :: delta_M_X_rain, delta_M_Y_rain, M_deposite
+      real(kind=dp) :: delta_M_Y_rain, M_deposite
       integer :: k_reservoir_lo, k_deposite_lo, k_deposite_hi, khi
       logical :: debug = .false.
       ierr = 0 ! 0 means AOK
@@ -1008,15 +1176,12 @@ contains
          write(*,*) 'set_Helium_deposit_region_abundance_change: k_deposite_hi = ', k_deposite_hi
       endif
 
-      ! get the rain mass of H (X), He (Y), and metal (Z)
-      delta_M_X_rain = - dot_product(s%dm(k_reservoir_lo:khi), precipitating_region%dX(k_reservoir_lo:khi))
+      ! get the rain mass of He (Y)
       delta_M_Y_rain = - dot_product(s%dm(k_reservoir_lo:khi), precipitating_region%dY(k_reservoir_lo:khi))
 
       ! mass abundance change in deeper layers
       M_deposite = sum(s%dm(k_deposite_lo:k_deposite_hi))
-      precipitating_region%dX(k_deposite_lo:k_deposite_hi) = delta_M_X_rain/M_deposite
       precipitating_region%dY(k_deposite_lo:k_deposite_hi) = delta_M_Y_rain/M_deposite
-      precipitating_region%dZ(k_deposite_lo:k_deposite_hi) = - precipitating_region%dX(k_deposite_lo:k_deposite_hi) - precipitating_region%dY(k_deposite_lo:k_deposite_hi)
 
    end subroutine set_Helium_deposit_region_abundance_change
 
@@ -1184,11 +1349,16 @@ contains
 
    subroutine free_phase_diagram(pd)
       type(phase_diagram), intent(inout) :: pd
+      
 
       if (allocated(pd%He_rich)) deallocate(pd%He_rich)
       if (allocated(pd%He_poor)) deallocate(pd%He_poor)
       if (allocated(pd%T)) deallocate(pd%T)
       if (allocated(pd%P)) deallocate(pd%P)
+      if (allocated(pd%unique_P)) deallocate(pd%unique_P)
+      if (allocated(pd%unique_P_index)) deallocate(pd%unique_P_index)
+      if (allocated(pd%num_Ts_at_unique_Ps)) deallocate(pd%num_Ts_at_unique_Ps)
+
    end subroutine free_phase_diagram
 
    function linear_interpolation(x, x1, x2, y1, y2) result(y)
@@ -1487,6 +1657,114 @@ contains
       end if
 
    end subroutine Y_is_miscible
+
+   subroutine adjust_mass_fractions(s,  precipitating_region)
+      type (star_info), pointer :: s
+      type (immiscibility_region), intent(in) :: precipitating_region
+      integer :: i, k, n_species
+      real(kind=dp) :: f
+      
+      n_species = size(s%xa, 1)
+
+      !$OMP PARALLEL DO PRIVATE(i, k, f) SCHEDULE(guided)
+      do i = 1, n_species
+         if (i == i_Y) cycle
+         do k = 1, s% nz
+         f = 1d0-precipitating_region%dY(k)/(1d0 - s% xa(i_Y, k))
+         s% xa(i, k) = f * s% xa(i, k)
+         end do
+      end do
+      !$OMP END PARALLEL DO
+
+      s% xa(i_Y, 1:s% nz) = s% xa(i_Y, 1:s% nz) + precipitating_region%dY(1:s% nz)
+
+      ! HHK: test that again we conserved mass
+
+   end subroutine adjust_mass_fractions
+
+   subroutine get_mass_fractions(s, xa, X, Y, Z)
+      type (star_info), pointer :: s
+      real(kind=dp), intent(in) :: xa(:)
+      real(kind=dp), intent(out) :: X, Y, Z
+
+      ! fluff that we don't need
+      real(dp) :: abar, zbar, z2bar, z53bar, ye, mass_correction, sumx
+      
+      ! get the composition info
+      call basic_composition_info( &
+         s% species, s% chem_id, xa, X, Y, Z, &
+         abar, zbar, z2bar, z53bar, ye, mass_correction, sumx)
+   end subroutine get_mass_fractions
+
+   ! copied from phase_separation.F90
+   ! subroutine update_model_ (s, kc_t, kc_b, do_brunt)
+
+   !      use turb_info, only: set_mlt_vars
+   !      use brunt, only: do_brunt_B
+   !      use micro
+        
+   !      type(star_info), pointer :: s
+   !      integer, intent(in)      :: kc_t
+   !      integer, intent(in)      :: kc_b
+   !      logical, intent(in)      :: do_brunt
+        
+   !      integer  :: ierr
+   !      integer  :: kf_t
+   !      integer  :: kf_b
+
+   !      logical :: mask(s%nz)
+
+   !      mask(:) = .true.
+
+   !      ! Update the model to reflect changes in the abundances across
+   !      ! cells kc_t:kc_b (the mask part of this call is unused, mask=true for all zones).
+   !      ! Do updates at constant (P,T) rather than constant (rho,T).
+   !      s%fix_Pgas = .true.
+   !      call set_eos_with_mask(s, kc_t, kc_b, mask, ierr)
+   !      if (ierr /= 0) then
+   !         write(*,*) 'phase_separation: error from call to set_eos_with_mask'
+   !         stop
+   !      end if
+   !      s%fix_Pgas = .false.
+        
+   !      ! Update opacities across cells kc_t:kc_b (this also sets rho_face
+   !      ! and related quantities on faces kc_t:kc_b)        
+   !      call set_micro_vars(s, kc_t, kc_b, &
+   !           skip_eos=.TRUE., skip_net=.TRUE., skip_neu=.TRUE., skip_kap=.FALSE., ierr=ierr)
+   !      if (ierr /= 0) then
+   !         write(*,*) 'phase_separation: error from call to set_micro_vars'
+   !         stop
+   !      end if
+
+   !      ! This is expensive, so only do it if we really need to.
+   !      if(do_brunt) then
+   !         ! Need to make sure we can set brunt for mix_outward calculation.
+   !         if(.not. s% calculate_Brunt_B) then
+   !            stop "phase separation requires s% calculate_Brunt_B = .true."
+   !         end if
+   !         call do_brunt_B(s, kc_t, kc_b, ierr) ! for unsmoothed_brunt_B
+   !         if (ierr /= 0) then
+   !            write(*,*) 'phase_separation: error from call to do_brunt_B'
+   !            stop
+   !         end if
+   !      end if
+
+   !      ! Finally update MLT for interior faces
+        
+   !      kf_t = kc_t
+   !      kf_b = kc_b + 1
+        
+   !      call set_mlt_vars(s, kf_t+1, kf_b-1, ierr)
+   !      if (ierr /= 0) then
+   !         write(*,*) 'phase_separation: failed in call to set_mlt_vars during update_model_'
+   !         stop
+   !      endif
+        
+   !      ! Finish
+        
+   !      return
+        
+   !    end subroutine update_model_
 
 
 end module helium_rain
