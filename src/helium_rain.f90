@@ -26,11 +26,17 @@ module helium_rain
    integer, parameter :: bottom_up_rain = 1
    integer, parameter :: advection_diffusion_rain = 2
 
+   real(dp), parameter :: very_tiny = 1d-12
    real(dp), parameter :: tiny = 1d-10
    real(dp), parameter :: small = 1d-4
+   real(dp), parameter :: helium_rain_threshold = 1d-4   ! ignore helium rain if the change in the helium mass fraction is smaller than this value
 
    real(kind=dp) :: gentle_mixing_maximum_helium_rain_dY ! maximum change allowed in the helium mass fraction
    integer :: i_Y = -1
+   logical :: debug = .true.
+   logical :: debug_advection_diffusion_solver = .false.
+   logical :: debug_phase_diagram = .true.
+   logical :: verbose = .true.
 
    ! TODO: make this a stand-alone module that can call other star modules
    ! TODO: once done, implement the _update method.
@@ -51,6 +57,13 @@ module helium_rain
       real(kind=dp), allocatable :: dY(:) ! change in the mass fractions
    end type immiscibility_region
 
+   type advection_diffusion_state
+      integer :: nz  ! number of zones
+      real(kind=dp) :: dt  ! time step
+      real(kind=dp), allocatable :: D(:), v(:)
+      real(kind=dp), allocatable :: dr(:), Y(:), dY(:)  ! dY is the change in the helium mass fraction
+   end type advection_diffusion_state
+
    type(phase_diagram) :: helium_immiscibility_phase_diagram
    logical :: phase_diagram_loaded = .false.
 
@@ -62,7 +75,7 @@ contains
       character(len=*), intent(in) :: phase_diagram_filename
       real(kind=dp), intent(in) :: maximum_dY_change_per_step
       integer, intent(out) :: ierr
-      logical :: verbose = .false.
+
       include 'formats'
 
       ierr = 0 ! 0 means AOK
@@ -83,7 +96,7 @@ contains
       phase_diagram_loaded = .true.
       if (ierr /= 0) return
 
-      if (verbose) call print_phase_diagram(helium_immiscibility_phase_diagram)
+      if (debug_phase_diagram) call print_phase_diagram(helium_immiscibility_phase_diagram)
       
    end subroutine init_helium_rain
 
@@ -96,13 +109,6 @@ contains
       ierr = 0 ! 0 means AOK
 
       if (i_Y == -1) i_Y = s% net_iso(chem_get_iso_id('he4'))
-
-      ! check that method is valid (currently, we only implemented instant rain)
-      if (method /= instant_rain) then
-         ierr = 1
-         write(*,*) 'do_helium_rain: invalid method for helium rain'
-         return
-      end if
 
       select case (method)
        case (instant_rain)
@@ -122,26 +128,241 @@ contains
    subroutine do_advection_diffusion_rain(s, ierr)
       type (star_info), pointer :: s
       integer, intent(out) :: ierr
-   
+
+      ! local
+      integer, parameter :: max_iterations = 100
+      integer :: i, j
+      type(advection_diffusion_state) :: adv_diff_state
+
       ierr = 0 ! 0 means AOK
 
-      ! the steps are somewhat clear:
-      ! 1. Find the regions that are precipitating,
-      ! 2. Give them a non-zero v_settle, 
-      ! 3. and run your solver
+
+      do i = 1, max_iterations
+         if (verbose) write(*,*) 'do_advection_diffusion_rain: iteration: ', i
+
+         ! initialize the advection-diffusion state
+         call init_advection_diffusion_state(s, adv_diff_state, ierr)
+         if (ierr /= 0) return
+
+         ! if adv_diff_state % v is not allocated, no precipitating regions were found; exit the loop
+         if (.not. allocated(adv_diff_state % v)) then
+            if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: no precipitating regions found, skipping advection-diffusion step'
+            call free_advection_diffusion_state(adv_diff_state)
+            exit
+         end if
+
+         ! perform the advection-diffusion step
+         call backward_Euler_step(adv_diff_state, ierr)
+         if (ierr /= 0) return
+         
+         if (debug_advection_diffusion_solver) then
+            do j = 1, adv_diff_state%nz
+               write(*,*) 'do_advection_diffusion_rain: (k, Y(k), dY(k)) = ', j, adv_diff_state%Y(j), adv_diff_state%dY(j)
+            end do
+         end if
+
+         call adjust_mass_fractions(s, adv_diff_state% dY, ierr)
+
+         ! check if the change in the helium mass fraction is below a threshold
+         if (all(abs(adv_diff_state%dY) < helium_rain_threshold)) then
+            if (verbose) write(*,*) 'do_advection_diffusion_rain: no significant change in helium mass fraction'
+            if (verbose) write(*,*) 'do_advection_diffusion_rain: max(|dY|) = ', maxval(abs(adv_diff_state%dY))
+            exit
+         end if
+
+         call free_advection_diffusion_state(adv_diff_state)
+      end do
+
+      ! don't mix afterwards
+      s% D_mix(1:s% nz) = 0d0
+
 
    end subroutine do_advection_diffusion_rain
+
+   subroutine init_advection_diffusion_state(s, adv_diff_state, ierr)
+      type (star_info), pointer :: s
+      type(advection_diffusion_state), intent(out) :: adv_diff_state
+      integer, intent(out) :: ierr
+
+      ! local
+      real(kind=dp), allocatable :: Y_miscible(:)  ! miscible helium mass fraction
+      logical, allocatable :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable :: v_settle(:)  ! settling velocity
+      integer :: k
+
+      ierr = 0 ! 0 means AOK
+
+      ! function to populate a advection_diffusion_state type used for the advection-diffusion solver
+      adv_diff_state % nz = s% nz
+      allocate(adv_diff_state % D(1:s% nz), source=s% D_mix(1: s% nz))  ! diffusion coefficient
+      allocate(adv_diff_state % Y(1:s% nz), source=s% xa(i_Y, 1: s% nz))  ! diffusion coefficient
+      allocate(adv_diff_state % dY(1:s% nz), source=0d0)  ! diffusion coefficient
+
+      ! radial step size
+      allocate(adv_diff_state % dr(1:s% nz))  
+      !$OMP PARALLEL DO PRIVATE(k) SCHEDULE(guided)
+      do k = 1, s % nz
+         adv_diff_state % dr(k) = get_dr(s, k)
+      end do
+      !$OMP END PARALLEL DO
+
+      call get_raw_miscibility(s, is_miscible, Y_miscible,  ierr)
+      if (ierr /= 0) then
+         write(*,*) 'init_advection_diffusion_state: error in get_raw_miscibility'
+         return
+      end if
+
+      ! if everything is miscible, we can skip the advection-diffusion step
+      if (all(is_miscible)) then
+         if (debug_advection_diffusion_solver) write(*,*) 'init_advection_diffusion_state: all regions are miscible, skipping advection-diffusion step'
+         return
+      end if
+      
+      call get_settling_velocity(s, adv_diff_state % v, is_miscible, Y_miscible, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'init_advection_diffusion_state: error in get_settling_velocity'
+         return
+      end if
+
+      call get_time_step(adv_diff_state, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'init_advection_diffusion_state: error in get_time_step'
+         return
+      end if
+
+      if (debug_advection_diffusion_solver) then
+         write(*,*) 'init_advection_diffusion_state: advection-diffusion state initialized'
+         write(*,*) 'init_advection_diffusion_state: nz = ', adv_diff_state % nz
+         write(*,*) 'init_advection_diffusion_state: dt = ', adv_diff_state % dt
+         do k = 1, adv_diff_state % nz
+            write(*,'(a,i12,99(1pd26.16))') 'init_advection_diffusion_state: (k, D(k), v(k), dr(k), Y(k)) = ', k, adv_diff_state % D(k), adv_diff_state % v(k), adv_diff_state % dr(k), adv_diff_state % Y(k)
+         end do
+      end if
+
+      deallocate(Y_miscible, is_miscible)
+      
+   end subroutine init_advection_diffusion_state
+
+   subroutine get_time_step(adv_diff_state, ierr)
+      type(advection_diffusion_state), intent(inout) :: adv_diff_state
+      integer, intent(out) :: ierr
+
+      ! local
+      real(kind=dp) :: tau_adv ! advection timescale
+      real(kind=dp) :: tau_diff ! diffusion timescale
+      real(kind=dp) :: tau_adv_div_tau_diff  ! ratio of advection to diffusion timescale
+      real(kind=dp) :: L, v, D
+      logical, allocatable :: mask(:)
+      real(kind=dp) :: fraction_of_timescale = 1d7
+      
+      ierr = 0 ! 0 means AOK
+
+      allocate(mask(adv_diff_state%nz))
+      mask = (adv_diff_state%v /= 0d0)
+
+      v = dot_product(pack(adv_diff_state% v, mask), pack(adv_diff_state% dr, mask))
+      D = dot_product(pack(adv_diff_state% D, mask), pack(adv_diff_state% dr, mask))
+      L = sum(pack(adv_diff_state% dr, mask))
+
+      if (D <= 0d0) then
+         ierr = 1
+         write(*,*) 'get_time_step: diffusion coefficient is zero or negative'
+         return
+      end if
+      if (v <= 0d0) then
+         ierr = 1
+         write(*,*) 'get_time_step: settling velocity is zero or negative'
+         return
+      end if
+      if (L <= 0d0) then
+         ierr = 1
+         write(*,*) 'get_time_step: radial step size is zero or negative'
+         return
+      end if
+
+      tau_adv = L/v
+      tau_diff = L**2 / D
+      tau_adv_div_tau_diff = tau_adv/tau_diff
+      adv_diff_state% dt = min(tau_adv, tau_diff) * fraction_of_timescale
+
+      if (debug_advection_diffusion_solver) then
+         write(*,*) 'get_time_step: tau_adv = ', tau_adv
+         write(*,*) 'get_time_step: tau_diff = ', tau_diff
+         write(*,*) 'get_time_step: tau_adv_div_tau_diff = ', tau_adv_div_tau_diff
+         write(*,*) 'get_time_step: dt = ', adv_diff_state% dt
+      end if
+
+   
+      deallocate(mask)
+
+   end subroutine get_time_step
+
+   subroutine free_advection_diffusion_state(adv_diff_state)
+      type(advection_diffusion_state), intent(inout) :: adv_diff_state
+
+      ! free the allocated arrays
+      if (allocated(adv_diff_state % D)) deallocate(adv_diff_state % D)
+      if (allocated(adv_diff_state % v)) deallocate(adv_diff_state % v)
+      if (allocated(adv_diff_state % dr)) deallocate(adv_diff_state % dr)
+      if (allocated(adv_diff_state % Y)) deallocate(adv_diff_state % Y)
+      if (allocated(adv_diff_state % dY)) deallocate(adv_diff_state % dY)
+
+      ! reset the state
+      adv_diff_state % nz = 0
+      adv_diff_state % dt = 0d0
+
+      if (debug_advection_diffusion_solver) then
+         write(*,*) 'free_advection_diffusion_state: advection-diffusion state freed'
+      end if
+   
+      
+   end subroutine free_advection_diffusion_state
+
+   subroutine backward_Euler_step(adv_diff_state, ierr)
+      type(advection_diffusion_state), intent(inout) :: adv_diff_state
+      integer, intent(out) :: ierr
+
+      ! local variables
+      integer :: i, nz, k
+      real(kind=dp), allocatable :: a(:), b(:), c(:), f_n(:), f_np1(:)
+
+      ierr = 0 ! 0 means AOK
+      nz = adv_diff_state % nz
+
+      ! use tridiagonal matrix solver in the range [2, N-1]
+      ! the other values are set by boundary conditions
+      allocate(a(nz-2), b(nz-2), c(nz-2), f_n(nz-2), f_np1(nz-2))
+
+      ! Set tridiagonal matrix coefficients
+      ! a(1) and c(-1) are not used
+      call setup_tridiagonal(adv_diff_state, a, b, c)  ! hhk
+      
+      f_n(1:nz-2) = adv_diff_state% Y(2:nz-1)
+      call tridag(a, b, c, f_n, f_np1)
+      
+      ! set change in helium abundance
+      adv_diff_state% dY(1) = f_np1(1) - f_n(1) ! Neumann BC at r=0
+      adv_diff_state% dY(2:nz-1) = f_np1(1:nz-2) - f_n(1:nz-2) ! interior points
+      adv_diff_state% dY(nz) = f_np1(nz-2) - f_n(nz-2) ! Neumann BC at r=L
+
+      if ( debug_advection_diffusion_solver ) then
+         write(*,'(a16,a16,a16,a16)') 'k','f_n(k)', 'f_np1(k)', 'dY(k)'
+         do k = 1, nz-2
+            write(*,'(i12,99(1pd26.16))') k+1, f_n(k), f_np1(k), adv_diff_state% dY(k+1)
+         end do  
+      end if
+
+      deallocate(a, b, c, f_n, f_np1)
+   end subroutine backward_Euler_step
 
    subroutine do_bottom_up_rain(s,  ierr)
       type (star_info), pointer :: s
       integer :: i
       integer, intent(out) :: ierr
 
-      logical :: verbose = .true.
-
       integer, parameter :: max_iterations = 10000
       integer :: j
-      integer :: klo, khi
+      integer :: klo, khi, k_mix, k
 
       ! debugging
       logical :: debug = .false.
@@ -156,37 +377,41 @@ contains
       ierr = 0 ! 0 means AOK
 
       allocate(xa_pre(size(s%xa, 1), size(s%xa, 2)))
-
+      
       do j=1, max_iterations
          
-         if (verbose) write(*,*) 'do_instant_rain: iteration: ', j
-         xa_pre = s%xa
+         if (verbose) write(*,*) 'do_bottom_up_rain: iteration: ', j
+         xa_pre = s% xa
 
          ! determine the precipitating region
+         ! if allocated, deallocate precipitating regions
+         if (allocated(precipitating_regions)) deallocate(precipitating_regions)
          call determine_precipitating_regions(s, precipitating_regions, ierr)
          if (ierr /= 0) return
          if (.not. allocated(precipitating_regions)) then
-            if (verbose) write(*,1) 'do_instant_rain: no precipitating region found.'
+            if (verbose) write(*,1) 'do_bottom_up_rain: no precipitating region found.'
             return
          end if
+
+
 
          ! determine the upper convective helium reservoir
          call determine_top_reservoirs(s, precipitating_regions, ierr)
          if (ierr /= 0) then
-            write(*,*) 'do_instant_rain: error in determine_top_reservoirs'
+            write(*,*) 'do_bottom_up_rain: error in determine_top_reservoirs'
             return
          endif
 
          ! determine deposit region
          call determine_helium_deposites(s, precipitating_regions, ierr)
          if (ierr /= 0) then
-            write(*,*) 'do_instant_rain: error in determine_helium_deposites'
+            write(*,*) 'do_bottom_up_rain: error in determine_helium_deposites'
             return
          endif
 
          call check_precipitating_regions(precipitating_regions, ierr)
          if (ierr /= 0) then
-            write(*,*) 'do_instant_rain: error in check_precipitating_regions'
+            write(*,*) 'do_bottom_up_rain: error in check_precipitating_regions'
             return
          endif
 
@@ -201,39 +426,52 @@ contains
             ! Set all changes in dY except the lowest cell equal to zero
             ! no need to adjust the top reservoir (yet)
             if (klo /= khi) then
-               precipitating_regions(i)%dY(1:khi-1) = 0d0
-            else
-               ! case 2: We are at the top of the raining region (klo == khi)
-               ! Adjust the top reservoir accordingly
-               call set_top_reservoir_abundance_change(s,  precipitating_regions(i), ierr)
-               if (ierr /= 0) then
-                  write(*,*) 'do_instant_rain: error in set_top_reservoir_abundance_change'
-                  return
-               endif
+               write(*,*) 'precipitating_regions(i)%dY(klo:khi): ', precipitating_regions(i)%dY(klo:khi)
+               k_mix = khi
+               do k = khi, klo, -1
+                  if (abs(precipitating_regions(i)%dY(k)) < helium_rain_threshold) then
+                     precipitating_regions(i)%dY(k) = 0d0
+                     k_mix = k - 1
+                  else
+                     exit
+                  end if
+               end do
+               precipitating_regions(i)%dY(1:k_mix-1) = 0d0
+               write(*,*) 'precipitating_regions(i)%dY(klo:khi): ', precipitating_regions(i)%dY(klo:khi)
             end if
+
+            call set_top_reservoir_abundance_change(s,  precipitating_regions(i), ierr)
+            if (ierr /= 0) then
+               write(*,*) 'do_bottom_up_rain: error in set_top_reservoir_abundance_change'
+               return
+            endif
 
             call set_Helium_deposit_region_abundance_change(s,  precipitating_regions(i), ierr)
             if (ierr /= 0) then
-               write(*,*) 'do_instant_rain: error in set_Helium_deposit_region_abundance_change'
+               write(*,*) 'do_bottom_up_rain: error in set_Helium_deposit_region_abundance_change'
                return
             endif
 
             if ( debug ) then
                do k_debug = 1, s%nz
                   call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
-                  write(*,2) 'do_instant_rain: (k, X, Y, Z, dY): ', &
+                  write(*,2) 'do_bottom_up_rain: (k, X, Y, Z, dY): ', &
                      k_debug, X, Y, Z, &
                      precipitating_regions(i)%dY(k_debug)
                end do
             end if
 
-            call adjust_mass_fractions(s, precipitating_regions(i))
+            call adjust_mass_fractions(s, precipitating_regions(i)% dY, ierr)
+            if (ierr /= 0) then
+               write(*,*) 'do_bottom_up_rain: error in adjust_mass_fractions'
+               return
+            end if
 
             if ( debug ) then
-               write(*,*) 'do_instant_rain: after setting the abundances:'
+               write(*,*) 'do_bottom_up_rain: after setting the abundances:'
                do k_debug = 1, s%nz
                   call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
-                  write(*,2) 'do_instant_rain: (k, X, Y, Z): ', &
+                  write(*,2) 'do_bottom_up_rain: (k, X, Y, Z): ', &
                      k_debug, X, Y, Z
                end do
             end if
@@ -244,18 +482,18 @@ contains
             end if
 
          end do
-
-         call check_after_rain(s, precipitating_regions, xa_pre, ierr)
-         deallocate(precipitating_regions)
-
+         
          if ( verbose ) then
             k_debug = maxloc(abs(s%xa(i_Y, 1:s%nz)-xa_pre(i_Y, 1:s%nz)), dim=1)
             if (verbose) write(*,*) 'maximum difference: (k, val)', k_debug,  abs(s%xa(i_Y, k_debug)-xa_pre(i_Y, k_debug))
          end if
+         
          if (all(abs(s%xa(i_Y, 1:s%nz)-xa_pre(i_Y,1:s%nz)) < small)) exit
 
       end do
-      deallocate(xa_pre)
+
+      call check_after_rain(s, precipitating_regions, xa_pre, ierr)
+      deallocate(xa_pre, precipitating_regions)
    
    end subroutine do_bottom_up_rain
 
@@ -263,8 +501,6 @@ contains
       type (star_info), pointer :: s
       integer :: i
       integer, intent(out) :: ierr
-
-      logical :: verbose = .true.
 
       integer, parameter :: max_iterations = 1000
       integer :: j
@@ -339,7 +575,11 @@ contains
                end do
             end if
 
-            call adjust_mass_fractions(s, precipitating_regions(i))
+            call adjust_mass_fractions(s, precipitating_regions(i)% dY, ierr)
+            if (ierr /= 0) then
+               write(*,*) 'do_bottom_up_rain: error in adjust_mass_fractions'
+               return
+            end if
 
             if ( debug ) then
                write(*,*) 'do_instant_rain: after setting the abundances:'
@@ -628,28 +868,16 @@ contains
 
       ! utils
       integer, intent(out) :: ierr
-      logical :: debug = .false.
       integer :: k_debug
 
       include 'formats'
 
+      call get_raw_miscibility(s, is_miscible, Y_miscible,  ierr)
+
       ! set up arrays
-      allocate(Y_miscible(s%nz), Y(s%nz), is_miscible(s%nz))
-
-      ! if i_Y is not set (=-1), call chem_get_iso_id('he4') to get the index
-      if (i_Y == -1) i_Y = s% net_iso(chem_get_iso_id('he4'))
+      allocate(Y(s%nz))
       
-      ! shorthand for the helium mass fraction
       Y = s%xa(i_Y, 1:s%nz)
-
-      !$OMP PARALLEL DO PRIVATE(k, op_err) SCHEDULE(guided)
-      do k = 1, s%nz
-         op_err = 0  ! Each thread gets its own local copy of ierr
-         call Y_is_miscible(s%lnPgas(k), s%lnT(k), Y(k), is_miscible(k), Y_miscible(k), helium_immiscibility_phase_diagram, op_err)
-         if (op_err /= 0) ierr = op_err
-      end do
-      !$OMP END PARALLEL DO
-      if (ierr /= 0) return
 
 
       ! if is_miscible is .true. everywhere, we don't need to do anything
@@ -725,8 +953,12 @@ contains
       end do
 
       if (s% do_gentle_mixing) then
-         call reduce_helium_difference(s, Y_miscible, is_miscible, 1, s%nz, ierr)
-         if (ierr /= 0) return
+         do i = 1, size(klo)
+            call reduce_helium_difference(s, Y_miscible, is_miscible, klo(i), khi(i), ierr)
+            if (ierr /= 0) return
+            ! call trim_region(s, Y_miscible, is_miscible, klo(i), khi(i), ierr)
+            ! if (ierr /= 0) return
+         end do
       end if
 
       call enforce_helium_gradient(Y_miscible, klo, khi, ierr)
@@ -748,19 +980,58 @@ contains
    subroutine reduce_helium_difference(s, Y_miscible, is_miscible, klo, khi, ierr)
       type (star_info), pointer :: s
       real(kind=dp), allocatable, intent(inout) :: Y_miscible(:)
-      real(kind=dp), allocatable :: Y(:)
-      logical, allocatable, intent(in) :: is_miscible(:)
-      integer, intent(in) :: klo, khi  ! region in which we reduce the helium difference
+      real(kind=dp), allocatable :: Y_old(:)
+      logical, allocatable, intent(inout) :: is_miscible(:)
+      integer, intent(inout) :: klo, khi  ! region in which we reduce the helium difference
       integer, intent(out) :: ierr
       
-      allocate(Y(klo:khi), source=0d0)
-      Y = s%xa_old(s%net_iso(chem_get_iso_id('he4')), klo:khi)
+      integer :: k, khi_new
 
+      allocate(Y_old(klo:khi), source=0d0)
+      Y_old = s% xa_old(i_Y, klo:khi)
+      
       ! the is_miscible check already makes sure that Y_miscible is less than Y; hence, we don't need absolute values
-      Y_miscible(klo:khi) = merge(Y(klo:khi) + gentle_mixing_maximum_helium_rain_dY, Y_miscible(klo:khi), (.not. is_miscible(klo:khi)) .and. (Y_miscible(klo:khi) < Y(klo:khi) + gentle_mixing_maximum_helium_rain_dY))
-
+      Y_miscible(klo:khi) = merge(Y_old(klo:khi) + gentle_mixing_maximum_helium_rain_dY, Y_miscible(klo:khi), (.not. is_miscible(klo:khi)) .and. (Y_miscible(klo:khi) < Y_old(klo:khi) + gentle_mixing_maximum_helium_rain_dY))
+      
+      deallocate(Y_old)
    
    end subroutine reduce_helium_difference
+
+   subroutine trim_region(s, Y_miscible, is_miscible, klo, khi, ierr)
+      type (star_info), pointer :: s
+      real(kind=dp), allocatable, intent(inout) :: Y_miscible(:)
+      logical, allocatable, intent(inout) :: is_miscible(:)
+      integer, intent(inout) :: klo, khi  ! region in which we reduce the helium difference
+      integer, intent(out) :: ierr
+      
+      ! local
+      integer :: k, khi_new
+      real(kind=dp), allocatable :: Y(:)
+
+      if (klo == khi) return  ! no trimming if the zone has size 1
+      ! make sure that dY is not zero for the bottom zone
+
+      allocate(Y(klo:khi), source=s%xa(i_Y, klo:khi))
+      
+      
+      khi_new = khi
+      write(*,*) 'reduce_helium_difference: klo+1, klo, khi, khi_new: ', klo+1, klo, khi_new  ! HHK
+         do k = khi, klo+1, -1
+            write(*,*) 'k, Y_miscible(k), Y(k): ', k, Y_miscible(k), Y(k)
+            if (abs(Y_miscible(k) - Y(k)) > very_tiny) then
+               exit
+            else
+               write(*,*) 'reduce_helium_difference: Y_miscible(k) is too small' ! HHK
+               Y_miscible(k) = -1d0
+               khi_new = k - 1
+               is_miscible(k) = .true.
+            end if
+         end do
+
+      khi = khi_new
+      write(*,*) 'reduce_helium_difference: klo, khi, khi_new: ', klo, khi,  khi_new
+      deallocate(Y)
+   end subroutine trim_region
 
    subroutine join_small_precipitating_regions(s, klo, khi, n_precipitating_regions, Y_miscible, is_miscible, ierr)
       ! if regions are very small any only differ by a few zones, artifacts form.
@@ -855,8 +1126,7 @@ contains
 
       ! utils
       integer, intent(out) :: ierr
-      logical :: verbose = .true.
-      logical :: debug = .false.
+
       real(kind=dp) :: X, Y, Z
       include 'formats'
 
@@ -920,8 +1190,6 @@ contains
       real(kind=dp) :: dH
       real(kind=dp), parameter :: minimal_pressure_scale_height = 1d0
 
-      logical :: verbose = .false.
-      logical :: debug = .false.
       include 'formats'
 
       ierr = 0
@@ -1026,8 +1294,6 @@ contains
       type (immiscibility_region), intent(inout) :: precipitating_regions(:)
       integer, intent(out) :: ierr
       integer :: k, i, k_max
-      logical :: verbose = .false.
-      logical :: debug = .false.
       include 'formats'
 
       ierr = 0
@@ -1087,7 +1353,6 @@ contains
       integer, intent(out) :: ierr
       integer :: i, k
       logical :: strictly_increasing
-      logical :: verbose = .false.
       include 'formats'
 
       ierr = 0 ! 0 means AOK
@@ -1121,7 +1386,6 @@ contains
       real(kind=dp), allocatable :: Y_crit(:)
       logical, allocatable :: is_miscible(:)
       integer :: klo, k_reservoir_lo, k_reservoir_hi
-      logical :: debug = .false.
       ierr = 0 ! 0 means AOK
 
       k_reservoir_lo = precipitating_region%k_reservoir_lo
@@ -1268,7 +1532,6 @@ contains
       integer, intent(out) :: ierr
       integer :: i, j
       integer, allocatable :: P_indices(:), T_indices(:)
-      logical :: verbose = .false.
       include 'formats'
 
       ierr = 0 ! 0 means AOK
@@ -1295,7 +1558,7 @@ contains
       pd%num_Ts_at_unique_Ps(:pd%num_unique_Ps-1) = pd%unique_P_index(2:) - pd%unique_P_index(:pd%num_unique_Ps-1)
       pd%num_Ts_at_unique_Ps(pd%num_unique_Ps) = pd%n_points - pd%unique_P_index(pd%num_unique_Ps) + 1
 
-      if ( verbose ) then
+      if ( debug_phase_diagram ) then
          write(*,11) 'unique_Ps_and_Ts: num_Ps = ', pd%num_unique_Ps
          write(*,11) 'unique_Ps_and_Ts: unique_P_index = ', pd%unique_P_index
          write(*,1)  'unique_Ps_and_Ts: unique_P = ', pd%unique_P
@@ -1441,8 +1704,7 @@ contains
       real(kind=dp), allocatable :: T_lo(:), T_hi(:), Y_min_lo(:), Y_min_hi(:), Y_max_lo(:), Y_max_hi(:)
       integer, intent(out) :: ierr
       integer :: i, j
-      logical :: extrapolate = .true.
-      logical :: verbose = .false.
+      logical :: extrapolate = .false.
       include 'formats'
       ierr = 0 ! 0 means AOK
 
@@ -1458,7 +1720,7 @@ contains
 
       ! edge cases
       if (P0 < pd%unique_P(1) .or. P0 > pd%unique_P(pd%num_unique_Ps)) then
-         if ( verbose ) write(*,*) 'immiscible_helium_fraction_interpolation: P0 is outside the phase diagram. P0 = ', P0
+         if ( debug_phase_diagram ) write(*,*) 'immiscible_helium_fraction_interpolation: P0 is outside the phase diagram. P0 = ', P0
          return
       end if
 
@@ -1512,7 +1774,7 @@ contains
 
       ! if T0 below the temperature range, return -1d0
       if (T0 < T_lo(1) .or. T0 < T_hi(1)) then
-         if ( verbose ) write(*,*) 'immiscible_helium_fraction_interpolation: T0 below the data range T0 = ', T0
+         if ( debug_phase_diagram ) write(*,*) 'immiscible_helium_fraction_interpolation: T0 below the data range T0 = ', T0
          deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
          return
       end if
@@ -1597,7 +1859,7 @@ contains
          end if
       end if
 
-      if ( verbose ) then
+      if ( debug_phase_diagram ) then
          write(*,*) '----'
          write(*,*) 'immiscible_helium_fraction_interpolation: P0(Mbar) = ', P0/1d12
          write(*,*) 'immiscible_helium_fraction_interpolation: T0 = ', T0
@@ -1628,8 +1890,6 @@ contains
       integer, intent(out) :: ierr
       real(kind=dp) :: Y_max
 
-      logical :: debug = .false.
-
       ierr = 0 ! 0 means AOK
 
       ! convert to lin (already in cgs)
@@ -1642,7 +1902,7 @@ contains
       ! check that Y is in the miscible range
       if (Y_max < Y_miscible) then  ! outside of the miscible range
          is_miscible = .true.
-      else if (Y < Y_miscible .or. Y > Y_max) then
+      else if (Y <= Y_miscible .or. Y >= Y_max) then
          is_miscible = .true.
       else
          is_miscible = .false.
@@ -1658,25 +1918,33 @@ contains
 
    end subroutine Y_is_miscible
 
-   subroutine adjust_mass_fractions(s,  precipitating_region)
+   subroutine adjust_mass_fractions(s,  dY, ierr)
       type (star_info), pointer :: s
-      type (immiscibility_region), intent(in) :: precipitating_region
+      real(kind=dp), intent(in) :: dY(:)
+      integer, intent(out) :: ierr
       integer :: i, k, n_species
       real(kind=dp) :: f
+      ierr = 0 ! 0 means AOK
       
       n_species = size(s%xa, 1)
+      ! test that dY is the same size as s%xa
+      if (size(dY) /= s%nz) then
+         write(*,*) 'adjust_mass_fractions: dY is not the same size as s%xa'
+         ierr = 1
+         return
+      end if
 
       !$OMP PARALLEL DO PRIVATE(i, k, f) SCHEDULE(guided)
       do i = 1, n_species
          if (i == i_Y) cycle
          do k = 1, s% nz
-         f = 1d0-precipitating_region%dY(k)/(1d0 - s% xa(i_Y, k))
+         f = 1d0-dY(k)/(1d0 - s% xa(i_Y, k))
          s% xa(i, k) = f * s% xa(i, k)
          end do
       end do
       !$OMP END PARALLEL DO
 
-      s% xa(i_Y, 1:s% nz) = s% xa(i_Y, 1:s% nz) + precipitating_region%dY(1:s% nz)
+      s% xa(i_Y, 1:s% nz) = s% xa(i_Y, 1:s% nz) + dY(1:s% nz)
 
       ! HHK: test that again we conserved mass
 
@@ -1695,6 +1963,220 @@ contains
          s% species, s% chem_id, xa, X, Y, Z, &
          abar, zbar, z2bar, z53bar, ye, mass_correction, sumx)
    end subroutine get_mass_fractions
+
+   subroutine get_settling_velocity(s, v_settle, is_miscible, Y_miscible, ierr)
+      type (star_info), pointer :: s
+      real(kind=dp), allocatable, intent(out) :: v_settle(:)
+      logical, allocatable, intent(in) :: is_miscible(:)
+      real(kind=dp), allocatable, intent(in) :: Y_miscible(:)
+      integer, intent(out) :: ierr
+
+      ! local variables
+      real(kind=dp) :: v_settle_0 = 1d3 ! fixed setteling veliocity in cgs
+      ierr = 0 ! 0 means AOK
+
+      allocate(v_settle(s%nz), source=0d0)
+
+      v_settle(1:s%nz) = merge(0d0, v_settle_0, is_miscible(1:s%nz))
+      
+   end subroutine get_settling_velocity
+
+   subroutine tridag(a, b, c, f_n, f_np1)
+      real(kind=dp), intent(in) :: a(:), b(:), c(:)
+      real(kind=dp), intent(in) :: f_n(:)
+      real(kind=dp), intent(inout) :: f_np1(:)
+      
+      ! local variables
+      integer :: j, n
+      real(kind=dp), allocatable :: gam(:)
+      real(kind=dp) :: bet
+
+      ! check if the input arrays are of the same size
+      if (size(a) /= size(b) .or. size(b) /= size(c) .or. size(a) /= size(f_n) .or. size(f_n) /= size(f_np1)) then
+         write(*,*) "tridag: Error: Input arrays must be of the same size."
+         return
+      end if
+      if (size(a) == 0) then
+         write(*,*) "tridag: Error: Input arrays are empty."
+         return
+      end if
+      
+      ! if (debug) write(*,*) "tridag: f_n(1) = ", f_n(1)
+      ! if (debug) write(*,*) "tridag: f_np1(1) = ", f_np1(1)
+
+      n = size(b)
+      ! if (debug) write(*,*) 'tridag: n = ', n 
+      
+      allocate(gam(n))
+      ! if (debug) write(*,*) 'tridag: gam allocated'
+
+      if(b(1) == 0.0d0) then
+         write(*,*) "tridag: Error: b[0] is zero."
+         return
+      end if
+
+      ! forward elimination
+      ! if (debug) write(*,*) "tridag: start forward elimination"
+      bet = b(1)
+      f_np1(1) = f_n(1) / bet
+      
+
+      ! if (debug) write(*,*) "tridag: j = 1 finished"
+
+      do j = 2, n
+         ! if (debug) write(*,*) "tridag: j = ", j
+         gam(j) = c(j-1) / bet
+         bet = b(j) - a(j) * gam(j)
+         if (bet == 0.0d0) then
+            write(*,*) "Error: Division by zero in forward elimination."
+            return
+         end if
+         f_np1(j) = (f_n(j) - a(j) * f_np1(j-1)) / bet
+      end do
+      
+      ! back substitution
+      ! if (debug) write(*,*) "tridag: start backward elimination"
+      do j = n-1, 1, -1
+         ! if (debug) write(*,*) "tridag: j = ", j
+         f_np1(j) = f_np1(j) - gam(j+1) * f_np1(j+1)
+      end do
+
+      ! deallocate temporary arrays
+      deallocate(gam)
+
+      
+   end subroutine tridag
+
+   subroutine setup_tridiagonal(adv_diff_state, a, b, c)
+      type(advection_diffusion_state), intent(in) :: adv_diff_state
+      real(kind=dp), allocatable, intent(out) :: a(:), b(:), c(:)
+      integer :: i, j
+      integer :: nz
+   
+      nz = adv_diff_state% nz
+      
+      ! Allocate the arrays
+      allocate(a(nz-2), b(nz-2), c(nz-2))
+      
+      ! c(1) is the second index of 1, 2, …, N-1, N, i.e., 2
+
+      do i = 1, nz-2
+         ! we need to add one to i because a, b, and c, range from 2 to N-1 instead of 1 to N
+         a(i) = -alpha_half_step_down(adv_diff_state, i+1)
+         c(i) = -alpha_half_step_up(adv_diff_state, i+1) + beta_half_step_up(adv_diff_state, i+1)
+         b(i) = 1d0 + alpha_half_step_down(adv_diff_state, i+1) + alpha_half_step_up(adv_diff_state, i+1) - beta_half_step_down(adv_diff_state, i+1)
+      end do
+      
+      ! Set the boundary conditions
+      b(1) = 1d0 + alpha_half_step_up(adv_diff_state, 2) - beta_half_step_down(adv_diff_state, 2)
+      b(nz-2) = 1d0 + alpha_half_step_down(adv_diff_state, nz-1) - beta_half_step_down(adv_diff_state, nz-1) + beta_half_step_up(adv_diff_state, nz-1)
+
+      if (debug_advection_diffusion_solver) then
+         write(*,*) "--------------------------------"
+         write(*,'(a,i12,a,1pd26.16)') "Tridiagonal matrix setup with N = ", nz, " dt = ", adv_diff_state% dt
+         write(*,*) "Tridiagonal matrix coefficients:"
+         do i = 1, nz-2
+            write(*,'(i12,99(1pd26.16))') i, a(i), b(i), c(i)
+         end do
+         write(*,*) "Tridiagonal matrix setup successfully."
+         write(*,*) "--------------------------------"
+      end if
+   end subroutine setup_tridiagonal
+
+   real(kind=dp) function alpha_half_step_down(adv_diff_state, j)
+      type(advection_diffusion_state), intent(in) :: adv_diff_state
+      integer, intent(in) :: j
+      
+      real(kind=dp) :: dxCell, dxSurf, dt, D
+
+      dxCell = (adv_diff_state% dr(j+1) + adv_diff_state% dr(j)) / 2.0d0
+      dxSurf = adv_diff_state% dr(j)
+      dt = adv_diff_state% dt
+      D = (adv_diff_state% D(j-1) + adv_diff_state% D(j)) / 2.0d0
+      
+      ! Calculate the stability parameter
+      alpha_half_step_down = alpha(dxCell, dxSurf, dt, D)
+  
+   end function alpha_half_step_down
+
+   real(kind=dp) function alpha_half_step_up(adv_diff_state, j)
+      type(advection_diffusion_state), intent(in) :: adv_diff_state
+      integer, intent(in) :: j
+      
+      real(kind=dp) :: dxCell, dxSurf, dt, D
+
+      dxCell = (adv_diff_state% dr(j+1) + adv_diff_state% dr(j)) / 2.0d0
+      dxSurf = adv_diff_state% dr(j+1)
+      dt = adv_diff_state% dt
+      D = (adv_diff_state% D(j) + adv_diff_state% D(j+1)) / 2.0d0
+      
+      ! Calculate the stability parameter
+      alpha_half_step_up = alpha(dxCell, dxSurf, dt, D)
+  
+   end function alpha_half_step_up
+
+   function alpha(dxCell, dxSurf, dt, D)
+      real(kind=dp), intent(in) :: dxCell, dxSurf, dt, D
+      real(kind=dp) :: alpha
+      
+      ! Calculate the stability parameter
+      alpha = D * dt / (dxCell * dxSurf)
+      
+   end function alpha
+
+   real(kind=dp) function beta_half_step_down(adv_diff_state, j)
+      type(advection_diffusion_state), intent(in) :: adv_diff_state
+      integer, intent(in) :: j
+
+      real(kind=dp) :: dxCell, dt, v
+      dxCell = (adv_diff_state% dr(j+1) + adv_diff_state% dr(j)) / 2.0d0
+      dt = adv_diff_state% dt
+      v = (adv_diff_state% v(j-1) + adv_diff_state% v(j)) / 2.0d0
+      ! Calculate the stability parameter
+      beta_half_step_down = beta(dxCell, dt, v)
+
+   end function beta_half_step_down
+
+   real(kind=dp) function beta_half_step_up(adv_diff_state, j)
+      type(advection_diffusion_state), intent(in) :: adv_diff_state
+      integer, intent(in) :: j
+
+      real(kind=dp) :: dxCell, dt, v
+      dxCell = (adv_diff_state% dr(j+1) + adv_diff_state% dr(j)) / 2.0d0
+      dt = adv_diff_state% dt
+      v = (adv_diff_state% v(j) + adv_diff_state% v(j+1)) / 2.0d0
+      ! Calculate the stability parameter
+      beta_half_step_up = beta(dxCell, dt, v)
+   
+   end function beta_half_step_up
+
+   real(kind=dp) function beta(dxCell, dt, v)
+      real(kind=dp), intent(in) :: dxCell, dt, v
+      
+      ! Calculate the beta parameter
+      beta = dt * v / dxCell
+
+      ! throw an error if beta is greater than 1
+      if (abs(beta) > 1.0d0) then
+         write(*,*) "Error: beta is greater than 1.0, beta = ", beta
+         stop
+      end if
+   
+      
+   end function beta
+
+   function get_dr(s, k) result(dr)
+      type(star_info), pointer :: s
+      integer, intent(in) :: k
+      real(kind=dp) :: dr
+
+      if (k == s% nz) then
+         dr = s% r(k) - s% R_center
+      else
+         dr = s% r(k) - s% r(k+1)
+      end if
+      
+   end function get_dr
 
    ! copied from phase_separation.F90
    ! subroutine update_model_ (s, kc_t, kc_b, do_brunt)

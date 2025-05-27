@@ -33,7 +33,7 @@ module run_star_extras
    implicit none
 
    ! Globale Variable für das Regenmodell
-   integer, parameter :: helium_rain_method = bottom_up_rain
+   integer, parameter :: helium_rain_method = instant_rain
    real(kind=dp), parameter :: maximum_dY_change_per_step = -5d-3
 
    character(len=*), parameter :: phase_diagram_filename = 'src/phase_diagrams/Schöttler+2018.csv'
@@ -431,10 +431,8 @@ contains
          end if
 
          s% D_mix(klo:khi) = 0d0
-      !  case (bottom_up_rain)
-         !  call do_bottom_up_rain(s, ierr)
        case (advection_diffusion_rain)
-         ! call do_advection_diffusion_rain(s, ierr)
+         ! do nothing, the advection_diffusion_rain routine will handle the D_mix
        case default
          ierr = 1
          write(*,*) 'my_other_D_mix: unknown method for helium rain'
