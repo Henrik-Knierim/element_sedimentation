@@ -32,7 +32,7 @@
 
 &controls
 
-   log_directory   = 'LOGS/test/'
+   log_directory   = 'LOGS/instant_rain_extrapolate_false_temperature_shift/'
 
    ! mixing parameters
    ! =================
