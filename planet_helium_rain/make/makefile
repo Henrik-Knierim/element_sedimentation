@@ -15,7 +15,7 @@ endif
 WORK_COMPILE += $(FCopt)
 
 # STAR_WORK_OBJS defined in makefile_header
-OBJS = $(RUN_STAR_EXTRA_OBJS) $(STAR_WORK_OBJS) run.o helium_rain.o
+OBJS = $(RUN_STAR_EXTRA_OBJS) $(STAR_WORK_OBJS) run.o
 
 WORK_DIR = ..
 WORK_SRC_DIR = $(WORK_DIR)/src
@@ -28,9 +28,6 @@ $(STAR) : $(OBJS)
 
 # WORK_COMPILE defined in makefile_header
 
-helium_rain.o: $(WORK_SRC_DIR)/helium_rain.f90
-	$(WORK_COMPILE) $<
-
 ifeq ($(SKIP_NAN_TRAPS),YES)
 run.o: $(WORK_SRC_DIR)/run.f90
 	$(WORK_COMPILE) $<
@@ -40,10 +37,10 @@ run.o: $(WORK_SRC_DIR)/run.f90
 endif
 
 ifeq ($(MESA_CONTRIB_DIR),)
-run_star_extras.o: $(WORK_SRC_DIR)/run_star_extras.f90 helium_rain.o
+run_star_extras.o: $(WORK_SRC_DIR)/run_star_extras.f90
 	$(WORK_COMPILE) $<
 else
-run_star_extras.o: $(WORK_SRC_DIR)/run_star_extras.f90 helium_rain.o
+run_star_extras.o: $(WORK_SRC_DIR)/run_star_extras.f90
 	$(WORK_COMPILE) -I $(MESA_CONTRIB_DIR)/hooks $<
 endif
 

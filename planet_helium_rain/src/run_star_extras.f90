@@ -283,8 +283,6 @@ contains
       ierr = 0
       call star_ptr(id, s, ierr)
       if (ierr /= 0) return
-
-      call free_phase_diagram(helium_immiscibility_phase_diagram)
    end subroutine extras_after_evolve
 
    ! subroutine my_other_diffusion(id, dt, ierr)

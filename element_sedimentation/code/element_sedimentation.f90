@@ -3,7 +3,7 @@
 ! ***********************************************************************
 module element_sedimentation
 
-   use star_lib
+   use star_private_def
    use const_def
    use chem_lib
 
@@ -11,7 +11,6 @@ module element_sedimentation
 
    private
 
-   public :: init_element_sedimentation
    public :: shutdown_phase_diagram
    public :: do_element_sedimentation
 
@@ -80,10 +79,13 @@ contains
       end if
 
       ! load the phase diagram
-      immiscibility_phase_diagram%phase_diagram_filename = trim(s% element_sedimentation_phase_diagram)
-      call load_phase_diagram(immiscibility_phase_diagram, ierr)
+      immiscibility_phase_diagram% phase_diagram_filename = trim(s% element_sedimentation_phase_diagram)
+      call load_phase_diagram(s, immiscibility_phase_diagram, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'init_element_sedimentation: error in load_phase_diagram'
+         return
+      end if
       phase_diagram_loaded = .true.
-      if (ierr /= 0) return
 
       extrapolate = s% element_sedimentation_extrapolate_phase_diagram
 
@@ -102,6 +104,12 @@ contains
 
       ierr = 0 ! 0 means AOK
 
+      ! if not already done, initialize the element sedimentation
+      if (.not. phase_diagram_loaded) call init_element_sedimentation(s, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'do_element_sedimentation: error in init_element_sedimentation'
+         return
+      end if
       ! get the method to use for the element sedimentation
       ! we first assign the method and then select the correct subroutine
       ! to be able to reference the method in the subroutine later if needed (currently not the case)
@@ -1631,9 +1639,9 @@ contains
 
    end subroutine check_phase_diagram
 
-   subroutine shutdown_phase_diagram(pd)
-      type(phase_diagram), intent(inout) :: pd
-      
+   subroutine shutdown_phase_diagram()
+      type(phase_diagram) :: pd
+      pd = immiscibility_phase_diagram
 
       if (allocated(pd%He_rich)) deallocate(pd%He_rich)
       if (allocated(pd%He_poor)) deallocate(pd%He_poor)

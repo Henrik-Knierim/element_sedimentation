@@ -52,10 +52,6 @@
    
    ! mlt_make_surface_no_mixing = .true.
 
-   ! gentle mixing
-   do_gentle_mixing   = .true.
-   gentle_mixing_iso = 'o16' ! Element of which we check that the gradient is gentle; Z = 'o16', Y = 'he4'
-
    ! MLT part
    energy_eqn_option = 'dedt'
 
@@ -106,10 +102,10 @@
 
    ! helium rain
    ! ==========
-   do_element_diffusion = .true.
-   use_other_diffusion = .true.
-   use_other_D_mix = .true.
-   diffusion_dt_limit = 1d-99 !3.15d7
+   do_element_sedimentation = .true.
+   element_sedimentation_maximum_dXi_per_cell = 1d-2
+   element_sedimentation_phase_diagram_temperature_shift = 5000
+   element_sedimentation_phase_diagram = 'src/Schöttler+2018.csv'
 
 
    ! atmosphere

@@ -87,7 +87,7 @@ class InstallationFile:
         self.module_path: str = os.path.dirname(self.mesa_path)
 
         # check if the mesa file exists
-        # skip the check for gentle_mixing.f90
+        # skip the check for the new file
         if not os.path.exists(self.full_mesa_path) and self.name != NEW_FILE_NAME:
             raise FileNotFoundError(f"{self.full_mesa_path} not found.")
 
@@ -104,7 +104,7 @@ class InstallationFile:
         if os.path.exists(self.backup_path):
             return
 
-        # skip backup for the gentle_mixing.f90 file
+        # skip backup for the new file
         if self.name == NEW_FILE_NAME:
             return
 
@@ -285,7 +285,7 @@ class InstallationFile:
         if self.replace_file:
             shutil.copy(self.code_path, self.full_mesa_path)
 
-            # if the file is gentle_mixing.f90, we are done
+            # if the file is the new file, we are done
             if self.name == NEW_FILE_NAME:
                 print(f"Copied {self.name} into {self.mesa_path}.") if verbose else None
             else:
@@ -301,7 +301,7 @@ class InstallationFile:
     def uninstall(self) -> None:
         """Uninstalls the new code from the MESA directory."""
 
-        # for gentle_mixing.f90, simply remove the file
+        # for the new file, simply remove the file
         if self.name == NEW_FILE_NAME:
             os.remove(self.full_mesa_path)
             print(f"Removed {self.name}.") if verbose else None
@@ -344,11 +344,7 @@ if args.command == "install":
 
     # install all the files in the install_info dictionary
     for key, value in install_info.items():
-        
-        # the eos file needs to be installed separately to pass the installation tests
-        if key == "eospt_eval.f90":
-            continue
-
+    
         print("-" * 80) if verbose else None
         file = InstallationFile(key, value["replace"], value["mesa_path"])
         file.install()
@@ -356,9 +352,6 @@ if args.command == "install":
     # execute ./clean and ./install in the MESA directory
     os.system("cd $MESA_DIR; ./clean; ./install")
 
-    # install the eos file separately
-    eos_file = InstallationFile("eospt_eval.f90", install_info["eospt_eval.f90"]["replace"], install_info["eospt_eval.f90"]["mesa_path"])
-    eos_file.install()
 
     # execute ./clean and ./mk in the $MESA_DIR/eos directory
     os.system("cd $MESA_DIR/eos; ./clean; ./mk; ./export")

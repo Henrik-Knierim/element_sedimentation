@@ -75,7 +75,7 @@
 
       ! ::
 
-    element_sedimentation_phase_diagram = 'src/Schöttler+2018.csv'
+    element_sedimentation_phase_diagram = ''
 
       ! element_sedimentation_phase_diagram_temperature_shift
       ! ~~~~~~~~~~~~~~
