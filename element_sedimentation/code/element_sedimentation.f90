@@ -23,17 +23,17 @@ module element_sedimentation
    real(dp), parameter :: small = 1d-4
    real(dp), parameter :: sedimentation_threshold = 1d-4   ! ignore sedimentation if the change in the mass fraction is smaller than this value
    real(dp), parameter :: temperature_shift = 0d0
+   character(len=32), parameter :: phase_diagram_elements(2) = [character(len=32) :: 'h1', 'he4']
 
    integer :: i_Xi = -1
    logical :: debug = .false.
    logical :: debug_advection_diffusion_solver = .false.
    logical :: debug_phase_diagram = .false.
    logical :: verbose = .false.
+   logical :: custom_debug = .true. ! for dirty debugging
    logical :: extrapolate = .false.
    logical :: damp_sedimentation ! originally, damping was determined via do_gentle_mixing. Since gentle_mixing is not officially supported, I decided to make this module self-contained.
 
-   ! TODO: make this a stand-alone module that can call other star modules
-   ! TODO: once done, implement the _update method.
 
    type phase_diagram
       character(len=1024) :: phase_diagram_filename
@@ -140,6 +140,9 @@ contains
          return
       end select
 
+      call update_model_(s, 1, s% nz, .true.)
+      s% need_to_setvars = .true.
+
    end subroutine do_element_sedimentation
 
    subroutine do_advection_diffusion_rain(s, ierr)
@@ -190,8 +193,9 @@ contains
          call free_advection_diffusion_state(adv_diff_state)
       end do
 
-      ! don't mix afterwards
-      s% D_mix(1:s% nz) = 0d0
+      ! TODO: Adjust the mixing in the sedimenting region
+      stop
+      ! call adjust_mixing_in_sedimenting_region(s, precipitating_regions, ierr)
 
 
    end subroutine do_advection_diffusion_rain
@@ -383,7 +387,7 @@ contains
 
       integer, parameter :: max_iterations = 10000
       integer :: j
-      integer :: klo, khi, k_mix, k
+      integer :: klo, khi, k_mix, k, k_update
 
       ! debugging
       logical :: debug = .false.
@@ -447,7 +451,7 @@ contains
             ! Set all changes in dXi except the lowest cell equal to zero
             ! no need to adjust the top reservoir (yet)
             if (klo /= khi) then
-               write(*,*) 'precipitating_regions(i)%dXi(klo:khi): ', precipitating_regions(i)%dXi(klo:khi)
+               if (debug) write(*,*) 'precipitating_regions(i)%dXi(klo:khi): ', precipitating_regions(i)%dXi(klo:khi)
                k_mix = khi
                do k = khi, klo, -1
                   if (abs(precipitating_regions(i)%dXi(k)) < sedimentation_threshold) then
@@ -457,9 +461,20 @@ contains
                      exit
                   end if
                end do
+
+               if (k_mix < 1 .or. k_mix > s% nz) then
+                  ierr = 1
+                  write(*,*) 'do_bottom_up_rain: k_mix is out of bounds: ', k_mix
+                  write(*,*) 'do_bottom_up_rain: klo, khi: ', klo, khi
+                  return
+               end if
+               k_update = k_mix
                precipitating_regions(i)%dXi(1:k_mix-1) = 0d0
-               write(*,*) 'precipitating_regions(i)%dXi(klo:khi): ', precipitating_regions(i)%dXi(klo:khi)
+               if (debug) write(*,*) 'precipitating_regions(i)%dXi(klo:khi): ', precipitating_regions(i)%dXi(klo:khi)
+            else
+               k_update = precipitating_regions(i)% k_reservoir_lo
             end if
+
 
             call set_top_reservoir_abundance_change(s,  precipitating_regions(i), ierr)
             if (ierr /= 0) then
@@ -474,7 +489,7 @@ contains
             endif
 
             if ( debug ) then
-               do k_debug = 1, s%nz
+               do k_debug = 1, s% nz
                   call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
                   write(*,2) 'do_bottom_up_rain: (k, X, Y, Z, dXi): ', &
                      k_debug, X, Y, Z, &
@@ -490,7 +505,7 @@ contains
 
             if ( debug ) then
                write(*,*) 'do_bottom_up_rain: after setting the abundances:'
-               do k_debug = 1, s%nz
+               do k_debug = 1, s% nz
                   call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
                   write(*,2) 'do_bottom_up_rain: (k, X, Y, Z): ', &
                      k_debug, X, Y, Z
@@ -502,19 +517,32 @@ contains
                call monitor_mass_fractions(s,  precipitating_regions(i), ierr)
             end if
 
+            call update_model_(s, k_update, s% nz, .true.)
+
          end do
          
          if ( verbose ) then
-            k_debug = maxloc(abs(s%xa(i_Xi, 1:s%nz)-xa_pre(i_Xi, 1:s%nz)), dim=1)
-            if (verbose) write(*,*) 'maximum difference: (k, val)', k_debug,  abs(s%xa(i_Xi, k_debug)-xa_pre(i_Xi, k_debug))
+            k_debug = maxloc(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi, 1:s% nz)), dim=1)
+            write(*,*) 'maximum difference: (k, val)', k_debug,  abs(s%xa(i_Xi, k_debug)-xa_pre(i_Xi, k_debug))
          end if
          
-         if (all(abs(s%xa(i_Xi, 1:s%nz)-xa_pre(i_Xi,1:s%nz)) < small)) exit
+         if (all(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi,1:s% nz)) < sedimentation_threshold)) exit
 
       end do
 
       call check_after_rain(s, precipitating_regions, xa_pre, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'do_bottom_up_rain: error in check_after_rain'
+         return
+      end if
+      call adjust_mixing_in_sedimenting_region(s, precipitating_regions, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'do_bottom_up_rain: error in adjust_mixing_in_sedimenting_region'
+         return
+      end if
       deallocate(xa_pre, precipitating_regions)
+
+      
    
    end subroutine do_bottom_up_rain
 
@@ -588,7 +616,7 @@ contains
             endif
 
             if ( debug ) then
-               do k_debug = 1, s%nz
+               do k_debug = 1, s% nz
                   call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
                   write(*,2) 'do_instant_rain: (k, X, Y, Z, dXi): ', &
                      k_debug, X, Y, Z, &
@@ -604,7 +632,7 @@ contains
 
             if ( debug ) then
                write(*,*) 'do_instant_rain: after setting the abundances:'
-               do k_debug = 1, s%nz
+               do k_debug = 1, s% nz
                   call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
                   write(*,2) 'do_instant_rain: (k, X, Y, Z): ', &
                      k_debug, X, Y, Z
@@ -619,17 +647,20 @@ contains
          end do
 
          call check_after_rain(s, precipitating_regions, xa_pre, ierr)
+         call adjust_mixing_in_sedimenting_region(s, precipitating_regions, ierr)
          deallocate(precipitating_regions)
 
          if ( verbose ) then
-            k_debug = maxloc(abs(s%xa(i_Xi, 1:s%nz)-xa_pre(i_Xi, 1:s%nz)), dim=1)
+            k_debug = maxloc(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi, 1:s% nz)), dim=1)
             if (verbose) write(*,*) 'maximum difference: (k, val)', k_debug,  abs(s%xa(i_Xi, k_debug)-xa_pre(i_Xi, k_debug))
          end if
-         if (all(abs(s%xa(i_Xi, 1:s%nz)-xa_pre(i_Xi,1:s%nz)) < small)) exit
+         if (all(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi,1:s% nz)) < small)) exit
 
       end do
 
       deallocate(xa_pre)
+
+      
 
    end subroutine do_instant_rain
 
@@ -700,7 +731,7 @@ contains
          ! check that Xi in the top reservoir and precipitating region did not change by more than s% element_sedimentation_maximum_dXi_per_cell
          k_debug = maxloc(abs(s%xa(i_Xi, precipitating_regions(i)%k_reservoir_lo:precipitating_regions(i)%khi) - xa_pre(i_Xi, precipitating_regions(i)%k_reservoir_lo:precipitating_regions(i)%khi)), dim=1)
          dY_max = abs(s%xa(i_Xi, k_debug) - xa_pre(i_Xi, k_debug))
-         if (dY_max > abs(s% element_sedimentation_maximum_dXi_per_cell) + small) then
+         if (damp_sedimentation .and. dY_max > abs(s% element_sedimentation_maximum_dXi_per_cell) + small) then
             ierr = 1
             write(*,*) 'check_after_rain: Xi in the top reservoir and precipitating region changed by more than s% element_sedimentation_maximum_dXi_per_cell'
             write(*,*) 'k, abs(dY_max), abs(s% element_sedimentation_maximum_dXi_per_cell): ', k_debug, dY_max, abs(s% element_sedimentation_maximum_dXi_per_cell)
@@ -733,8 +764,8 @@ contains
       khi = precipitating_region%khi
 
       ! allocate the mass fraction changes
-      allocate(dXi(1:s%nz), source=0d0)
-      dXi(1:s%nz) = precipitating_region%dXi(1:s%nz)
+      allocate(dXi(1:s% nz), source=0d0)
+      dXi(1:s% nz) = precipitating_region%dXi(1:s% nz)
 
       M_rain = sum(s%dm(k_reservoir_lo:khi))
       M_deposite = sum(s%dm(k_deposite_lo:k_deposite_hi))
@@ -747,8 +778,8 @@ contains
       write(*,*) 'depositing region: ', k_deposite_lo, k_deposite_hi
       write(*,*) 'do_instant_rain: integrated dXi/M_deposite: ', dot_product(s%dm(k_deposite_lo:k_deposite_hi), dXi(k_deposite_lo:k_deposite_hi))/M_deposite
       write(*,*) ''
-      write(*,*) 'full region: ', 1, s%nz
-      write(*,*) 'do_instant_rain: integrated dXi/mstar: ', dot_product(s%dm(1:s%nz), dXi(1:s%nz))/s%mstar
+      write(*,*) 'full region: ', 1, s% nz
+      write(*,*) 'do_instant_rain: integrated dXi/mstar: ', dot_product(s%dm(1:s% nz), dXi(1:s% nz))/s%mstar
       write(*,*) '----------------------------------------'
       deallocate(dXi)
    end subroutine monitor_mass_fractions
@@ -764,7 +795,7 @@ contains
       logt = log10(s% time_years)
       if (logt < 9d0) return
 
-      allocate(dXi(1:s%nz), source=0d0)
+      allocate(dXi(1:s% nz), source=0d0)
 
       allocate(klo(1), khi(1))
       klo(1) = 400
@@ -842,26 +873,33 @@ contains
    subroutine get_raw_miscibility(s, is_miscible, Xi_miscible,  ierr)
       ! miscibility without any post-processing
       type(star_info), pointer :: s
-      real(kind=dp), allocatable, intent(out) :: Xi_miscible(:)
+      real(kind=dp), allocatable, intent(out) :: Xi_miscible(:)   ! miscible element mass fraction
       logical, allocatable, intent(out) :: is_miscible(:)  ! miscible regions
       
       ! local vars
-      real(kind=dp), allocatable :: Xi(:)
+      real(kind=dp), allocatable :: yi_miscible(:) ! miscible element _number_ fraction
+      real(kind=dp), allocatable :: yi(:)  ! element number fractions
+      real(kind=dp) :: X, Y, Z
       integer :: k
       integer :: op_err, ierr
 
       ierr = 0 ! 0 means AOK
       ! set up arrays
-      allocate(Xi_miscible(s%nz), Xi(s%nz), is_miscible(s%nz))
+      allocate(Xi_miscible(s% nz), is_miscible(s% nz), yi_miscible(s% nz))
       
-      ! shorthand for the element mass fraction
-      Xi = s% xa(i_Xi, 1:s%nz)
+      !$OMP PARALLEL DO PRIVATE(k, yi,  op_err) SCHEDULE(guided)
+      do k = 1, s% nz
 
-      !$OMP PARALLEL DO PRIVATE(k, op_err) SCHEDULE(guided)
-      do k = 1, s%nz
          op_err = 0  ! Each thread gets its own local copy of ierr
-         call Xi_is_miscible(s%lnPgas(k), s%lnT(k), Xi(k), is_miscible(k), Xi_miscible(k), immiscibility_phase_diagram, op_err)
+         call get_scaled_number_fractions(s, s% xa(:, k), yi, op_err)
          if (op_err /= 0) ierr = op_err
+
+         call yi_is_miscible(s%lnPgas(k), s%lnT(k), yi(i_Xi), is_miscible(k), yi_miscible(k), immiscibility_phase_diagram, op_err)
+         if (op_err /= 0) ierr = op_err
+
+         call from_scaled_number_fraction_to_mass_fraction(s, yi, yi_miscible(k), is_miscible(k), Xi_miscible(k), op_err)
+         if (op_err /= 0) ierr = op_err
+
       end do
       !$OMP END PARALLEL DO
       if (ierr /= 0) return
@@ -891,11 +929,15 @@ contains
       include 'formats'
 
       call get_raw_miscibility(s, is_miscible, Xi_miscible,  ierr)
+      if (ierr /= 0) then
+         write(*,*) 'get_precipitating_bounds: error in get_raw_miscibility'
+         return
+      end if
 
       ! set up arrays
-      allocate(Xi(s%nz))
+      allocate(Xi(s% nz))
       
-      Xi = s%xa(i_Xi, 1:s%nz)
+      Xi = s%xa(i_Xi, 1:s% nz)
 
 
       ! if is_miscible is .true. everywhere, we don't need to do anything
@@ -906,9 +948,9 @@ contains
 
 
       ! find the precipitating regions
-      allocate(klo_dummy(s%nz), khi_dummy(s%nz), source=-1)
+      allocate(klo_dummy(s% nz), khi_dummy(s% nz), source=-1)
       in_region = .false.
-      do k = 1, s%nz
+      do k = 1, s% nz
          if (.not. is_miscible(k) .and. .not. in_region) then
             klo_dummy(k) = k
             in_region = .true.
@@ -920,15 +962,15 @@ contains
 
       ! if the last zone is not miscible, set the end of the region
       if (in_region) then
-         khi_dummy(k) = s%nz
+         khi_dummy(k) = s% nz
          in_region = .false.
       end if
 
       ! allocate the precipitating regions
       n_precipitating_regions = size(pack(klo_dummy, klo_dummy > 0))
       allocate(klo(n_precipitating_regions), khi(n_precipitating_regions), source=-1)
-      klo = pack(klo_dummy(1:s%nz), klo_dummy(1:s%nz) > 0)
-      khi = pack(khi_dummy(1:s%nz), khi_dummy(1:s%nz) > 0)
+      klo = pack(klo_dummy(1:s% nz), klo_dummy(1:s% nz) > 0)
+      khi = pack(khi_dummy(1:s% nz), khi_dummy(1:s% nz) > 0)
 
       if ( debug ) then
          write(*,*) 'get_precipitating_bounds: before joining regions: '
@@ -983,11 +1025,11 @@ contains
       if (ierr /= 0) return
 
       ! get the difference between the miscible and the actual element mass fraction in the precipitating region
-      allocate(dXi(1:s%nz), source=0d0)
-      dXi(1:s%nz) = merge(0d0, Xi_miscible(1:s%nz) - Xi(1:s%nz), is_miscible(1:s%nz))
+      allocate(dXi(1:s% nz), source=0d0)
+      dXi(1:s% nz) = merge(0d0, Xi_miscible(1:s% nz) - Xi(1:s% nz), is_miscible(1:s% nz))
 
       if (debug) then
-         do k = 1, s%nz
+         do k = 1, s% nz
             write(*,'(a,i12,l5,99(1pd26.16))') 'get_precipitating_bounds: (k, is_miscible, Xi, Xi_miscible, dXi): ', &
                k, is_miscible(k), Xi(k), Xi_miscible(k), dXi(k)
          end do
@@ -1174,7 +1216,7 @@ contains
          precipitating_regions(i)%khi = khi(i)
 
          ! at this point, we haven't determined the top reservoir and the depositing region yet. Hence, we consider the largest possible region, setting it to zero everywhere.
-         allocate(precipitating_regions(i)%dXi(1:s%nz), source=0d0)
+         allocate(precipitating_regions(i)%dXi(1:s% nz), source=0d0)
 
          precipitating_regions(i)%dXi(klo(i):khi(i)) = dXi(klo(i):khi(i))
 
@@ -1234,7 +1276,7 @@ contains
          klo_local = precipitating_regions(i)% k_deposite_lo
 
          if (i == size(precipitating_regions)) then
-            khi_max = s%nz
+            khi_max = s% nz
          else
             khi_max = precipitating_regions(i+1)%klo - 1
          end if
@@ -1328,10 +1370,10 @@ contains
          precipitating_regions(i)% k_reservoir_lo = -1
          precipitating_regions(i)% k_reservoir_hi = precipitating_regions(i)%klo - 1
 
-         if ( i>1 ) then
-            k_max = precipitating_regions(i-1)%khi + 1
-         else
+         if ( i==1 ) then
             k_max = 1
+         else
+            k_max = precipitating_regions(i-1)%khi + 1
          end if
 
          if ( debug ) write(*,11) 'determine_top_reservoirs: (i, k_reservoir_hi, k_max): ', i, precipitating_regions(i)%k_reservoir_hi, k_max
@@ -1690,13 +1732,13 @@ contains
       y = linear_interpolation(x, x_list(i), x_list(i+1), y_list(i), y_list(i+1))
    end function linear_list_interpolation
 
-   subroutine immiscible_Xi_fraction_interpolation(P0, T0, pd, Xi_min, Xi_max, ierr)
+   subroutine immiscible_yi_fraction_interpolation(P0, T0, pd, yi_min, yi_max, ierr)
       real(kind=dp), intent(in) :: P0, T0
       type(phase_diagram), intent(in) :: pd
-      real(kind=dp), intent(out) :: Xi_min, Xi_max
+      real(kind=dp), intent(out) :: yi_min, yi_max
       real(kind=dp) :: P_lo, P_hi
-      real(kind=dp) :: Xi_min_lo_interp, Xi_min_hi_interp, Xi_max_lo_interp, Xi_max_hi_interp
-      real(kind=dp), allocatable :: T_lo(:), T_hi(:), Y_min_lo(:), Y_min_hi(:), Y_max_lo(:), Y_max_hi(:)
+      real(kind=dp) :: yi_min_lo_interp, yi_min_hi_interp, yi_max_lo_interp, yi_max_hi_interp
+      real(kind=dp), allocatable :: T_lo(:), T_hi(:), yi_min_lo(:), yi_min_hi(:), yi_max_lo(:), yi_max_hi(:)
       integer, intent(out) :: ierr
       integer :: i, j
       logical :: outside_bounds
@@ -1704,8 +1746,8 @@ contains
       ierr = 0 ! 0 means AOK
 
       ! -1d0 means out of bounds and thus by default miscible
-      Xi_min = -1d0
-      Xi_max = -1d0
+      yi_min = -1d0
+      yi_max = -1d0
       ! in principle, you should check this. However, when you paralalize the code, this
       ! will create a lot of overhead. So, I just assume that the phase diagram is correct for now
       ! call check_phase_diagram(pd, ierr)
@@ -1714,38 +1756,38 @@ contains
       ! find the pressure values that enclose the P0
       call bisection_locate(P0, pd%unique_P, j, outside_bounds, ierr)
       if (ierr /= 0) then
-         write(*,*) 'immiscible_Xi_fraction_interpolation: bisection_locate failed'
+         write(*,*) 'immiscible_yi_fraction_interpolation: bisection_locate failed'
          return
       end if
 
       ! if we are outside the phase diagram, everything is miscible by default
       if (outside_bounds) then
-         if ( debug_phase_diagram ) write(*,*) 'immiscible_Xi_fraction_interpolation: P0 is outside the phase diagram. P0 = ', P0
+         if ( debug_phase_diagram ) write(*,*) 'immiscible_yi_fraction_interpolation: P0 is outside the phase diagram. P0 = ', P0
          return
       end if
 
       P_lo = pd%unique_P(j)
       P_hi = pd%unique_P(j+1)
 
-      ! now that we have the pressure values, find the respective temperature and Xi_min/Xi_max values
+      ! now that we have the pressure values, find the respective temperature and yi_min/yi_max values
       allocate(T_lo(pd%num_Ts_at_unique_Ps(j)), T_hi(pd%num_Ts_at_unique_Ps(j+1)), &
-         Y_min_lo(pd%num_Ts_at_unique_Ps(j)), Y_min_hi(pd%num_Ts_at_unique_Ps(j+1)), &
-         Y_max_lo(pd%num_Ts_at_unique_Ps(j)), Y_max_hi(pd%num_Ts_at_unique_Ps(j+1)), source=-1d0)
+         yi_min_lo(pd%num_Ts_at_unique_Ps(j)), yi_min_hi(pd%num_Ts_at_unique_Ps(j+1)), &
+         yi_max_lo(pd%num_Ts_at_unique_Ps(j)), yi_max_hi(pd%num_Ts_at_unique_Ps(j+1)), source=-1d0)
 
       T_lo = pd%T(pd%unique_P_index(j):pd%unique_P_index(j+1)-1)
-      Y_min_lo = pd%He_poor(pd%unique_P_index(j):pd%unique_P_index(j+1)-1)
-      Y_max_lo = pd%He_rich(pd%unique_P_index(j):pd%unique_P_index(j+1)-1)
+      yi_min_lo = pd%He_poor(pd%unique_P_index(j):pd%unique_P_index(j+1)-1)
+      yi_max_lo = pd%He_rich(pd%unique_P_index(j):pd%unique_P_index(j+1)-1)
 
       T_hi = pd%T(pd%unique_P_index(j+1):pd%num_Ts_at_unique_Ps(j+1)+pd%unique_P_index(j+1)-1)  ! slightly cumbersome way because of the edge case where P(n-1) < P0 < P(n)
-      Y_min_hi = pd%He_poor(pd%unique_P_index(j+1):pd%num_Ts_at_unique_Ps(j+1)+pd%unique_P_index(j+1)-1)
-      Y_max_hi = pd%He_rich(pd%unique_P_index(j+1):pd%num_Ts_at_unique_Ps(j+1)+pd%unique_P_index(j+1)-1)
+      yi_min_hi = pd%He_poor(pd%unique_P_index(j+1):pd%num_Ts_at_unique_Ps(j+1)+pd%unique_P_index(j+1)-1)
+      yi_max_hi = pd%He_rich(pd%unique_P_index(j+1):pd%num_Ts_at_unique_Ps(j+1)+pd%unique_P_index(j+1)-1)
 
       ! check that the temperature values are strictly increasing
       do i = 1, size(T_lo)-1
          if (T_lo(i) >= T_lo(i+1)) then
             ierr = 1
-            write(*,*) 'immiscible_Xi_fraction_interpolation: Tj is not strictly increasing'
-            deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+            write(*,*) 'immiscible_yi_fraction_interpolation: Tj is not strictly increasing'
+            deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
             return
          end if
       end do
@@ -1753,150 +1795,154 @@ contains
       do i = 1, size(T_hi)-1
          if (T_hi(i) >= T_hi(i+1)) then
             ierr = 1
-            write(*,*) 'immiscible_Xi_fraction_interpolation: Tjp1 is not strictly increasing'
-            deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+            write(*,*) 'immiscible_yi_fraction_interpolation: Tjp1 is not strictly increasing'
+            deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
             return
          end if
       end do
 
       ! if T0 below the temperature range, return -1d0
       if (T0 < T_lo(1) .or. T0 < T_hi(1)) then
-         if ( debug_phase_diagram ) write(*,*) 'immiscible_Xi_fraction_interpolation: T0 below the data range T0 = ', T0
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         if ( debug_phase_diagram ) write(*,*) 'immiscible_yi_fraction_interpolation: T0 below the data range T0 = ', T0
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
 
       ! if T0 is above the temperature range, extrapolate linearly (done in lineater_list_interpolation by default)
 
-      ! Xi_min
-      Xi_min_lo_interp = linear_list_interpolation(T0, T_lo, Y_min_lo, outside_bounds, ierr)
+      ! yi_min
+      yi_min_lo_interp = linear_list_interpolation(T0, T_lo, yi_min_lo, outside_bounds, ierr)
       if (ierr /= 0) then
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         write(*,*) 'immiscible_yi_fraction_interpolation: linear_list_interpolation for yi_min_lo failed'
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
 
       ! if we are outside the bounds and don't extrapolate, return -1d0
       if (outside_bounds .and. .not. extrapolate) then
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
 
-      Xi_min_hi_interp = linear_list_interpolation(T0, T_hi, Y_min_hi, outside_bounds, ierr)
+      yi_min_hi_interp = linear_list_interpolation(T0, T_hi, yi_min_hi, outside_bounds, ierr)
       if (ierr /= 0) then
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         write(*,*) 'immiscible_yi_fraction_interpolation: linear_list_interpolation for yi_min_hi failed'
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
       ! if we are outside the bounds and don't extrapolate, return -1d0
       if (outside_bounds .and. .not. extrapolate) then
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
 
-      Xi_min = linear_interpolation(P0, P_lo, P_hi, Xi_min_lo_interp, Xi_min_hi_interp)
+      yi_min = linear_interpolation(P0, P_lo, P_hi, yi_min_lo_interp, yi_min_hi_interp)
 
       if ( extrapolate ) then
-         Xi_min = max(min(1d0, Xi_min), 0d0)  ! make sure we are in the range of [0, 1]
+         yi_min = max(min(1d0, yi_min), 0d0)  ! make sure we are in the range of [0, 1]
       else
-         if (Xi_min < 0d0) then
+         if (yi_min < 0d0) then
             ierr = 1
-            write(*,*) 'immiscible_Xi_fraction_interpolation: Y_min_0 < 0'
-            deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+            write(*,*) 'immiscible_yi_fraction_interpolation: Y_min_0 < 0'
+            deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
             return
          end if
    
-         if (Xi_min > 1d0) then
+         if (yi_min > 1d0) then
             ierr = 1
-            write(*,*) 'immiscible_Xi_fraction_interpolation: Y_min_0 > 1'
-            deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+            write(*,*) 'immiscible_yi_fraction_interpolation: Y_min_0 > 1'
+            deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
             return
          end if
       end if
       
-      ! Xi_max
-      Xi_max_lo_interp = linear_list_interpolation(T0, T_lo, Y_max_lo, outside_bounds, ierr)
+      ! yi_max
+      yi_max_lo_interp = linear_list_interpolation(T0, T_lo, yi_max_lo, outside_bounds, ierr)
       if (ierr /= 0) then
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         write(*,*) 'immiscible_yi_fraction_interpolation: linear_list_interpolation for yi_max_lo failed'
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
       ! if we are outside the bounds and don't extrapolate, return -1d0
       if (outside_bounds .and. .not. extrapolate) then
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
 
-      Xi_max_hi_interp = linear_list_interpolation(T0, T_hi, Y_max_hi, outside_bounds, ierr)
+      yi_max_hi_interp = linear_list_interpolation(T0, T_hi, yi_max_hi, outside_bounds, ierr)
       if (ierr /= 0) then
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         write(*,*) 'immiscible_yi_fraction_interpolation: linear_list_interpolation for yi_max_hi failed'
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
       ! if we are outside the bounds and don't extrapolate, return -1d0
       if (outside_bounds .and. .not. extrapolate) then
-         deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+         deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
       
-      ! linear interpolation for Xi_max
-      Xi_max = linear_interpolation(P0, P_lo, P_hi, Xi_max_lo_interp, Xi_max_hi_interp)
+      ! linear interpolation for yi_max
+      yi_max = linear_interpolation(P0, P_lo, P_hi, yi_max_lo_interp, yi_max_hi_interp)
       
       ! if extrapolation is allowed, the linear functions might go outside the range of [0, 1]
       ! in this case, we set the values to 0 and 1
       ! if extrapolation is not allowed, we need to check that the values are in the range of [0, 1]
       ! and return an error if they are not
       if (extrapolate) then
-         Xi_max = min(max(0d0, Xi_max),1d0)
+         yi_max = min(max(0d0, yi_max),1d0)
       else
-         if (Xi_max < 0d0) then
+         if (yi_max < 0d0) then
             ierr = 1
-            write(*,*) 'immiscible_Xi_fraction_interpolation: Y_max_0 < 0'
-            deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+            write(*,*) 'immiscible_yi_fraction_interpolation: Y_max_0 < 0'
+            deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
             return
          end if
          
-         if (Xi_max > 1d0) then
+         if (yi_max > 1d0) then
             ierr = 1
-            write(*,*) 'immiscible_Xi_fraction_interpolation: Y_max_0 > 1'
-            deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+            write(*,*) 'immiscible_yi_fraction_interpolation: Y_max_0 > 1'
+            deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
             return
          end if
 
-         if (Xi_min > Xi_max) then
+         if (yi_min > yi_max) then
             ierr = 1
-            write(*,*) 'immiscible_Xi_fraction_interpolation: Xi_min > Xi_max'
-            deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+            write(*,*) 'immiscible_yi_fraction_interpolation: yi_min > yi_max'
+            deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
             return
          end if
       end if
 
       if ( debug_phase_diagram ) then
          write(*,*) '----'
-         write(*,*) 'immiscible_Xi_fraction_interpolation: P0(Mbar) = ', P0/1d12
-         write(*,*) 'immiscible_Xi_fraction_interpolation: T0 = ', T0
-         write(*,*) 'immiscible_Xi_fraction_interpolation: P_lo(Mbar) = ', P_lo/1d12
-         write(*,*) 'immiscible_Xi_fraction_interpolation: P_hi(Mbar) = ', P_hi/1d12
+         write(*,*) 'immiscible_yi_fraction_interpolation: P0(Mbar) = ', P0/1d12
+         write(*,*) 'immiscible_yi_fraction_interpolation: T0 = ', T0
+         write(*,*) 'immiscible_yi_fraction_interpolation: P_lo(Mbar) = ', P_lo/1d12
+         write(*,*) 'immiscible_yi_fraction_interpolation: P_hi(Mbar) = ', P_hi/1d12
          write(*,*) '----'
-         write(*,*) 'immiscible_Xi_fraction_interpolation: T_lo = ', T_lo
-         write(*,*) 'immiscible_Xi_fraction_interpolation: Y_min_lo = ', Y_min_lo
-         write(*,*) 'immiscible_Xi_fraction_interpolation: Y_lo_interp = ', Xi_min_lo_interp
+         write(*,*) 'immiscible_yi_fraction_interpolation: T_lo = ', T_lo
+         write(*,*) 'immiscible_yi_fraction_interpolation: yi_min_lo = ', yi_min_lo
+         write(*,*) 'immiscible_yi_fraction_interpolation: Y_lo_interp = ', yi_min_lo_interp
          write(*,*) '----'
-         write(*,*) 'immiscible_Xi_fraction_interpolation: T_hi = ', T_hi
-         write(*,*) 'immiscible_Xi_fraction_interpolation: Y_min_hi = ', Y_min_hi
-         write(*,*) 'immiscible_Xi_fraction_interpolation: Y_hi_interp = ', Xi_min_hi_interp
+         write(*,*) 'immiscible_yi_fraction_interpolation: T_hi = ', T_hi
+         write(*,*) 'immiscible_yi_fraction_interpolation: yi_min_hi = ', yi_min_hi
+         write(*,*) 'immiscible_yi_fraction_interpolation: Y_hi_interp = ', yi_min_hi_interp
          write(*,*) '----'
       end if
 
-      deallocate(T_lo, T_hi, Y_min_lo, Y_min_hi, Y_max_lo, Y_max_hi)
+      deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
 
-   end subroutine immiscible_Xi_fraction_interpolation
+   end subroutine immiscible_yi_fraction_interpolation
 
-   subroutine Xi_is_miscible(lnP, lnT, Xi, is_miscible, Xi_miscible, pd, ierr)
-      ! gives the highest element mass fraction that is miscible before the immiscibility gap
-      real(kind=dp), intent(in) :: lnP, lnT, Xi
+   subroutine yi_is_miscible(lnP, lnT, yi, is_miscible, yi_miscible, pd, ierr)
+      ! gives the highest element number fraction that is miscible before the immiscibility gap
+      real(kind=dp), intent(in) :: lnP, lnT, yi
       type(phase_diagram), intent(in) :: pd
-      real(kind=dp), intent(out) :: Xi_miscible
+      real(kind=dp), intent(out) :: yi_miscible
       logical, intent(out) :: is_miscible
       real(kind=dp) :: P0, T0
       integer, intent(out) :: ierr
-      real(kind=dp) :: Xi_max
+      real(kind=dp) :: yi_max
 
       ierr = 0 ! 0 means AOK
 
@@ -1904,27 +1950,29 @@ contains
       P0 = exp(lnP)
       T0 = exp(lnT)
 
-      call immiscible_Xi_fraction_interpolation(P0, T0, pd, Xi_miscible, Xi_max, ierr)
+      call immiscible_yi_fraction_interpolation(P0, T0, pd, yi_miscible, yi_max, ierr)
       if (ierr /= 0) return
 
-      ! check that Xi is in the miscible range
-      if (Xi_max < Xi_miscible) then  ! outside of the miscible range
+      ! check that yi is in the miscible range
+      if (yi_miscible < 0d0 .or. yi_max < 0d0) then
          is_miscible = .true.
-      else if (Xi <= Xi_miscible .or. Xi >= Xi_max) then
+      else if (yi_max < yi_miscible) then  ! outside of the miscible range
+         is_miscible = .true.
+      else if (yi <= yi_miscible .or. yi >= yi_max) then
          is_miscible = .true.
       else
          is_miscible = .false.
       end if
 
-      if ( debug .and. .not. is_miscible) then
-         write(*,*) 'Xi_is_miscible: P0 = ', P0/1d12
-         write(*,*) 'Xi_is_miscible: T0 = ', T0
-         write(*,*) 'Xi_is_miscible: Xi = ', Xi
-         write(*,*) 'Xi_is_miscible: Xi_min = ', Xi_miscible
-         write(*,*) 'Xi_is_miscible: Xi_max = ', Xi_max
+      if ( custom_debug .and. .not. is_miscible) then
+         write(*,*) 'yi_is_miscible: P0 = ', P0/1d12
+         write(*,*) 'yi_is_miscible: T0 = ', T0
+         write(*,*) 'yi_is_miscible: yi = ', yi
+         write(*,*) 'yi_is_miscible: yi_min = ', yi_miscible
+         write(*,*) 'yi_is_miscible: yi_max = ', yi_max
       end if
 
-   end subroutine Xi_is_miscible
+   end subroutine yi_is_miscible
 
    subroutine adjust_mass_fractions(s,  dXi, ierr)
       type (star_info), pointer :: s
@@ -1936,7 +1984,7 @@ contains
       
       n_species = size(s%xa, 1)
       ! test that dXi is the same size as s%xa
-      if (size(dXi) /= s%nz) then
+      if (size(dXi) /= s% nz) then
          write(*,*) 'adjust_mass_fractions: dXi is not the same size as s%xa'
          ierr = 1
          return
@@ -1970,7 +2018,130 @@ contains
       call basic_composition_info( &
          s% species, s% chem_id, xa, X, Y, Z, &
          abar, zbar, z2bar, z53bar, ye, mass_correction, sumx)
+
    end subroutine get_mass_fractions
+
+   subroutine get_scaled_number_fractions(s, xa, yi, ierr)
+      use chem_def, only: chem_isos
+      ! converts the mass fractions to number fractions
+      ! and allowing for renormalization, in case the phase diagram is not complete
+      type (star_info), pointer :: s
+      real(kind=dp), intent(in) :: xa(:)
+      real(kind=dp), intent(out), allocatable :: yi(:)
+
+      integer, intent(out) :: ierr
+      integer :: i, j, cid
+
+      real(kind=dp) :: yi_scaling
+      
+
+      ierr = 0 ! 0 means AOK
+      allocate(yi(s% species), source=0d0)
+
+      do i = 1, s% species
+         cid = s% chem_id(i)
+         yi(i) = xa(i) / dble(chem_isos% Z_plus_N(cid))
+      end do
+
+      yi_scaling = 0d0
+      do i = 1, size(phase_diagram_elements)
+         j = s% net_iso(chem_get_iso_id(trim(phase_diagram_elements(i))))
+         yi_scaling = yi_scaling + yi(j)
+      end do
+
+      yi = yi / yi_scaling ! note that this is not normalized at the moment and does thus not sum to 1
+      
+      if (any(yi < 0d0) .or. any(yi > 1d0)) then
+         ierr = 1
+         write(*,*) 'get_scaled_number_fractions: yi is out of bounds [0, 1]: ', yi
+         return
+      end if
+
+      if ( debug ) then
+         write(*,*) 'get_scaled_number_fractions: xa = ', xa
+         write(*,*) 'get_scaled_number_fractions: yi_scaling = ', yi_scaling
+         write(*,*) 'get_scaled_number_fractions: yi'
+         do i = 1, s% species
+            write(*, '(i3,1pd26.16)') i, yi(i)
+         end do
+      end if
+      
+   end subroutine get_scaled_number_fractions
+
+   subroutine from_scaled_number_fraction_to_mass_fraction(s, yi, yi_miscible, is_miscible,  Xi_miscible, ierr)
+      ! converts the number fractions to mass fractions
+      use chem_def, only: chem_isos
+      type (star_info), pointer :: s
+      real(kind=dp), intent(inout), allocatable :: yi(:)
+      real(kind=dp), intent(in) :: yi_miscible
+      logical, intent(in) :: is_miscible
+      real(kind=dp), intent(out) :: Xi_miscible
+      integer, intent(out) :: ierr
+      integer :: i, j, cid
+      real(kind=dp) :: dyi, f, mean_molecular_weight
+      logical :: verbose = .true.
+
+      ierr = 0 ! 0 means AOK
+
+      if (is_miscible) then
+         if (debug) write(*,*) 'from_scaled_number_fraction_to_mass_fraction: is_miscible is true, returning without changes'
+         Xi_miscible = -1d0  ! indicate that we are miscible
+         deallocate(yi)
+         return
+      end if
+
+      
+      dyi = yi_miscible - yi(i_Xi)  ! the difference to the miscible fraction
+
+      f = 1d0 - dyi / (1d0 - yi(i_Xi))  ! the factor to scale the number fractions
+
+      yi = f * yi ! adjust number fractions to refelct the change in yi_miscible
+      yi(i_Xi) = yi_miscible  ! set the miscible fraction to the desired value
+      yi = yi / sum(yi)  ! normalize the mass fractions
+      mean_molecular_weight = 0d0
+      do i = 1, s% species
+         cid = s% chem_id(i)
+         mean_molecular_weight = mean_molecular_weight + yi(i) * dble(chem_isos% Z_plus_N(cid))
+      end do
+
+      cid = s% chem_id(i_Xi)
+      Xi_miscible = yi(i_Xi) * dble(chem_isos% Z_plus_N(cid)) / mean_molecular_weight
+
+      if ( verbose ) then
+         !$OMP CRITICAL
+            write(*,*) 'from_scaled_number_fraction_to_mass_fraction: yi_miscible = ', yi_miscible
+            write(*,*) 'from_scaled_number_fraction_to_mass_fraction: is_miscible = ', is_miscible
+            write(*,*) 'from_scaled_number_fraction_to_mass_fraction: dyi = ', dyi
+            write(*,*) 'from_scaled_number_fraction_to_mass_fraction: f = ', f
+            write(*,*) 'from_scaled_number_fraction_to_mass_fraction: yi after normalization = '
+            do i = 1, s% species
+               write(*, '(i3, 1pd26.16)') i, yi(i)
+            end do
+            write(*,*) 'from_scaled_number_fraction_to_mass_fraction: mean_molecular_weight = ', mean_molecular_weight
+            write(*,*) 'from_scaled_number_fraction_to_mass_fraction: Xi_miscible = ', Xi_miscible
+         !$OMP END CRITICAL
+      end if
+
+      ! some tests
+      if (any(yi < 0d0) .or. any(yi > 1d0)) then
+         ierr = 1
+         write(*,*) 'from_scaled_number_fraction_to_mass_fraction: yi is out of bounds [0, 1]: ', yi
+         return
+      end if
+      if (abs(sum(yi) - 1d0) > tiny) then
+         ierr = 1
+         write(*,*) 'from_scaled_number_fraction_to_mass_fraction: yi does not sum to 1: ', sum(yi)
+         return
+      end if
+      if (Xi_miscible < 0d0 .or. Xi_miscible > 1d0) then
+         ierr = 1
+         write(*,*) 'from_scaled_number_fraction_to_mass_fraction: Xi_miscible is out of bounds [0, 1]: ', Xi_miscible
+         return
+      end if
+
+      deallocate(yi)
+      
+   end subroutine from_scaled_number_fraction_to_mass_fraction
 
    subroutine get_settling_velocity(s, v_settle, is_miscible, Xi_miscible, ierr)
       type (star_info), pointer :: s
@@ -1983,10 +2154,10 @@ contains
       real(kind=dp) :: v_settle_0
       ierr = 0 ! 0 means AOK
 
-      allocate(v_settle(s%nz), source=0d0)
+      allocate(v_settle(s% nz), source=0d0)
 
       v_settle_0 = s% element_sedimentation_velocity
-      v_settle(1:s%nz) = merge(0d0, v_settle_0, is_miscible(1:s%nz))
+      v_settle(1:s% nz) = merge(0d0, v_settle_0, is_miscible(1:s% nz))
       
    end subroutine get_settling_velocity
 
@@ -2263,75 +2434,140 @@ contains
       
    end subroutine bisection_locate
 
+   subroutine adjust_mixing_in_sedimenting_region(s, precipitating_regions, ierr)
+      type(star_info), pointer :: s
+      type (immiscibility_region), allocatable, intent(in) :: precipitating_regions(:)
+      integer, intent(out) :: ierr
+      
+      ! local variables
+      integer :: i
+      integer :: klo, khi  ! lower and upper bounds of the sedimenting region that we exclude from mixing
+      real(kind=dp) :: m_min, m_max  ! lower and upper bounds in mass of the sedimenting region that we exclude from mixing
+      logical :: boundaries_were_set = .false.
+      save :: m_min, m_max, boundaries_were_set
+      ierr = 0 ! 0 means AOK
+
+      if ( s%do_conv_premix ) then
+         write(*,*) 'You are using convective premixing and instant helium rain simultaneously. This will likely cause crashes.'
+         write(*,*) 'In CPM, regions that rain out will flip-flop between homogeneous and rainout mixing.'
+         write(*,*) 'If you know what you are doing, feel free to remove this check.'
+         ierr = 1
+         return
+      end if
+
+      ! if the region is not set yet, initialize it with the first region
+      if ( .not. boundaries_were_set ) then
+         if (verbose) write(*,*) 'zone_boundaries_by_mass: first call'
+         
+         klo = precipitating_regions(1)% klo
+         khi = precipitating_regions(1)% khi
+
+         if (verbose) write(*,*) 'initializing klo, khi = ', klo, khi
+         
+         ! ? Is this the best way to determine the non-mixing region? Just take the largest possible one? I should probably introduce multiple regions.
+         ! ? For now, we typically only have one region anyways, so this is fine. But for more complex cases, we might want to generalize this.
+         if (size(precipitating_regions) > 1) then
+            if (verbose) write(*,*) 'zone_boundaries_by_mass: multiple regions found, adjusting boundaries'
+            do i = 2, size(precipitating_regions)
+               klo = min(precipitating_regions(i)% klo, klo)
+               khi = max(precipitating_regions(i)% khi, khi)
+            end do
+         end if
+
+         m_max = s%m(klo)
+         m_min = s%m(khi)
+         boundaries_were_set = .true.
+      else
+
+         ! find klo and khi, the indices closest to m_max and m_min, respectively
+         khi = minloc(abs(s%m(1:s%nz)-m_min), dim=1)
+         klo = minloc(abs(s%m(1:s%nz)-m_max), dim=1)
+
+         ! check if the regions expanded
+         do i = 1, size(precipitating_regions)
+            klo = min(klo, precipitating_regions(i)% klo)
+            khi = max(khi, precipitating_regions(i)% khi)
+         end do
+         m_max = s%m(klo)
+         m_min = s%m(khi)
+      end if
+
+      s% D_mix(klo:khi) = 0d0  ! turn everything off for now; HHK
+      
+      if (verbose) write(*,'(a,2i12,3f26.16)') 'zone_boundaries_by_mass: klo, khi, m_max, m_min, dm = ', klo, khi, m_min/m_jupiter, m_max/m_jupiter, (m_max-m_min)/m_jupiter
+      
+   end subroutine adjust_mixing_in_sedimenting_region
+
    ! copied from phase_separation.F90
-   ! subroutine update_model_ (s, kc_t, kc_b, do_brunt)
+   subroutine update_model_ (s, kc_t, kc_b, do_brunt)
 
-   !      use turb_info, only: set_mlt_vars
-   !      use brunt, only: do_brunt_B
-   !      use micro
+        use turb_info, only: set_mlt_vars
+        use brunt, only: do_brunt_B
+        use micro
         
-   !      type(star_info), pointer :: s
-   !      integer, intent(in)      :: kc_t
-   !      integer, intent(in)      :: kc_b
-   !      logical, intent(in)      :: do_brunt
+        type(star_info), pointer :: s
+        integer, intent(in)      :: kc_t
+        integer, intent(in)      :: kc_b
+        logical, intent(in)      :: do_brunt
         
-   !      integer  :: ierr
-   !      integer  :: kf_t
-   !      integer  :: kf_b
+        integer  :: ierr
+        integer  :: kf_t
+        integer  :: kf_b
 
-   !      logical :: mask(s%nz)
+        logical :: mask(s% nz)
 
-   !      mask(:) = .true.
+        mask(:) = .true.
 
-   !      ! Update the model to reflect changes in the abundances across
-   !      ! cells kc_t:kc_b (the mask part of this call is unused, mask=true for all zones).
-   !      ! Do updates at constant (P,T) rather than constant (rho,T).
-   !      s%fix_Pgas = .true.
-   !      call set_eos_with_mask(s, kc_t, kc_b, mask, ierr)
-   !      if (ierr /= 0) then
-   !         write(*,*) 'phase_separation: error from call to set_eos_with_mask'
-   !         stop
-   !      end if
-   !      s%fix_Pgas = .false.
+        ! Update the model to reflect changes in the abundances across
+        ! cells kc_t:kc_b (the mask part of this call is unused, mask=true for all zones).
+        ! Do updates at constant (P,T) rather than constant (rho,T).
+        ! TODO: Add another mode that does not hold T constant
+        s%fix_Pgas = .true.
+        call set_eos_with_mask(s, kc_t, kc_b, mask, ierr)
+        if (ierr /= 0) then
+           write(*,*) 'element_sedimentation: error from call to set_eos_with_mask'
+           stop
+        end if
+        s%fix_Pgas = .false.
         
-   !      ! Update opacities across cells kc_t:kc_b (this also sets rho_face
-   !      ! and related quantities on faces kc_t:kc_b)        
-   !      call set_micro_vars(s, kc_t, kc_b, &
-   !           skip_eos=.TRUE., skip_net=.TRUE., skip_neu=.TRUE., skip_kap=.FALSE., ierr=ierr)
-   !      if (ierr /= 0) then
-   !         write(*,*) 'phase_separation: error from call to set_micro_vars'
-   !         stop
-   !      end if
+        ! Update opacities across cells kc_t:kc_b (this also sets rho_face
+        ! and related quantities on faces kc_t:kc_b)        
+        call set_micro_vars(s, kc_t, kc_b, &
+             skip_eos=.TRUE., skip_net=.TRUE., skip_neu=.TRUE., skip_kap=.FALSE., ierr=ierr)
+        if (ierr /= 0) then
+           write(*,*) 'element_sedimentation: error from call to set_micro_vars'
+           stop
+        end if
 
-   !      ! This is expensive, so only do it if we really need to.
-   !      if(do_brunt) then
-   !         ! Need to make sure we can set brunt for mix_outward calculation.
-   !         if(.not. s% calculate_Brunt_B) then
-   !            stop "phase separation requires s% calculate_Brunt_B = .true."
-   !         end if
-   !         call do_brunt_B(s, kc_t, kc_b, ierr) ! for unsmoothed_brunt_B
-   !         if (ierr /= 0) then
-   !            write(*,*) 'phase_separation: error from call to do_brunt_B'
-   !            stop
-   !         end if
-   !      end if
+        ! This is expensive, so only do it if we really need to.
+        if(do_brunt) then
+           ! Need to make sure we can set brunt for mix_outward calculation.
+           if(.not. s% calculate_Brunt_B) then
+              stop "phase separation requires s% calculate_Brunt_B = .true."
+           end if
+           call do_brunt_B(s, kc_t, kc_b, ierr) ! for unsmoothed_brunt_B
+           if (ierr /= 0) then
+              write(*,*) 'element_sedimentation: error from call to do_brunt_B'
+              stop
+           end if
+        end if
 
-   !      ! Finally update MLT for interior faces
+        ! Finally update MLT for interior faces
         
-   !      kf_t = kc_t
-   !      kf_b = kc_b + 1
+        kf_t = kc_t
+        kf_b = kc_b + 1
         
-   !      call set_mlt_vars(s, kf_t+1, kf_b-1, ierr)
-   !      if (ierr /= 0) then
-   !         write(*,*) 'phase_separation: failed in call to set_mlt_vars during update_model_'
-   !         stop
-   !      endif
+        call set_mlt_vars(s, kf_t+1, kf_b-1, ierr)
+        if (ierr /= 0) then
+           write(*,*) 'element_sedimentation: failed in call to set_mlt_vars during update_model_'
+           stop
+        endif
         
-   !      ! Finish
+        ! Finish
         
-   !      return
+        return
         
-   !    end subroutine update_model_
+      end subroutine update_model_
 
 
 end module element_sedimentation

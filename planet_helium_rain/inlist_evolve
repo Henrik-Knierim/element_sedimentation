@@ -32,7 +32,7 @@
 
 &controls
 
-   log_directory   = 'LOGS/instant_rain_extrapolate_false_temperature_shift/'
+   log_directory   = 'LOGS'
 
    ! mixing parameters
    ! =================
@@ -103,8 +103,9 @@
    ! helium rain
    ! ==========
    do_element_sedimentation = .true.
-   element_sedimentation_maximum_dXi_per_cell = 1d-2
-   element_sedimentation_phase_diagram_temperature_shift = 5000
+   element_sedimentation_maximum_dXi_per_cell = -1d0
+   element_sedimentation_method = 'instant_rain'
+   element_sedimentation_phase_diagram_temperature_shift = 0d0
    element_sedimentation_phase_diagram = 'src/Schöttler+2018.csv'
 
 
@@ -114,12 +115,14 @@
    atm_irradiated_opacity = 'iterated'
    atm_irradiated_T_eq = 122d0
    atm_irradiated_max_iters = 500
-   atm_irradiated_kap_v = 3.56762d-3
+   atm_irradiated_kap_v = 1d-3
    atm_irradiated_P_surf = 1d4
 
    ! timestep controls
    ! =================
-   ! max_years_for_timestep = 5d6
+   max_years_for_timestep = 5d6
+   delta_lgTeff_limit = 0.04d0
+   delta_lgL_limit = 0.2d0
    
    ! debug
    report_ierr = .true.
