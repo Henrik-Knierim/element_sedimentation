@@ -2051,9 +2051,9 @@ contains
 
       yi = yi / yi_scaling ! note that this is not normalized at the moment and does thus not sum to 1
       
-      if (any(yi < 0d0) .or. any(yi > 1d0)) then
+      if (any(yi < 0d0)) then
          ierr = 1
-         write(*,*) 'get_scaled_number_fractions: yi is out of bounds [0, 1]: ', yi
+         write(*,*) 'get_scaled_number_fractions: yi contains a negative value: ', yi
          return
       end if
 
@@ -2447,12 +2447,12 @@ contains
       save :: m_min, m_max, boundaries_were_set
       ierr = 0 ! 0 means AOK
 
-      if ( s%do_conv_premix ) then
+      if ( s% do_conv_premix ) then
          write(*,*) 'You are using convective premixing and instant helium rain simultaneously. This will likely cause crashes.'
          write(*,*) 'In CPM, regions that rain out will flip-flop between homogeneous and rainout mixing.'
+         write(*,*) 'This check sets do_conv_premix = .false.'
          write(*,*) 'If you know what you are doing, feel free to remove this check.'
-         ierr = 1
-         return
+         s% do_conv_premix = .false.
       end if
 
       ! if the region is not set yet, initialize it with the first region
