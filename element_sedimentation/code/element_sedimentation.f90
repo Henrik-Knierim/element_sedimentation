@@ -30,7 +30,7 @@ module element_sedimentation
    logical :: debug_advection_diffusion_solver = .false.
    logical :: debug_phase_diagram = .false.
    logical :: verbose = .false.
-   logical :: custom_debug = .true. ! for dirty debugging
+   logical :: custom_debug = .false. ! for dirty debugging
    logical :: extrapolate = .false.
    logical :: damp_sedimentation ! originally, damping was determined via do_gentle_mixing. Since gentle_mixing is not officially supported, I decided to make this module self-contained.
 
@@ -2079,7 +2079,6 @@ contains
       integer, intent(out) :: ierr
       integer :: i, j, cid
       real(kind=dp) :: dyi, f, mean_molecular_weight
-      logical :: verbose = .true.
 
       ierr = 0 ! 0 means AOK
 
