@@ -1,4 +1,4 @@
-# helium_rain
+# element_sedimentation
 An implementation of element sedimentation in MESA.
 
 ## Quickstart
