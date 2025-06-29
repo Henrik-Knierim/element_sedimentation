@@ -45,7 +45,7 @@
 
    ! MLT option
    MLT_option = 'Henyey'
-   mix_factor = 1d0
+   mix_factor = 0d0
    prune_bad_cz_min_Hp_height = 1d0
    steps_before_use_velocity_time_centering = 0
    ! use_gradT_actual_vs_gradT_MLT_for_T_gradient_eqn = .true.
@@ -106,7 +106,7 @@
    element_sedimentation_maximum_dXi_per_cell = -1d0
    element_sedimentation_method = 'instant_rain'
    element_sedimentation_phase_diagram_temperature_shift = 0d0
-   element_sedimentation_phase_diagram = 'src/Schöttler+2018.csv'
+   element_sedimentation_phase_diagram = 'src/Schoettler+2018.csv'
 
 
    ! atmosphere
@@ -120,7 +120,7 @@
 
    ! timestep controls
    ! =================
-   max_years_for_timestep = 5d6
+   max_years_for_timestep = 1d7
    delta_lgTeff_limit = 0.04d0
    delta_lgL_limit = 0.2d0
    
