@@ -636,6 +636,8 @@ contains
                klo, khi, M_chem/M_chem_pre, M_chem_pre, M_chem
          end if
 
+         ! TODO: Only check monotonicity in radiative regions.
+         ! ? The error probably arises from ommiting mixing
          call find_RCB(s, klo, khi, k_RCB, ierr)
          call check_abundance_array(s% xa(i, k_RCB:khi), check_range, monotonicity_method, ierr)
       end do
@@ -769,7 +771,7 @@ contains
          if (ierr /= 0) return
       end if
 
-      call find_k_rain(is_miscible, klo, khi, k_rain, ierr)
+      call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, khi, k_rain, ierr)
       if (ierr /= 0) then
          write(*,*) 'set_dXi: error in find_k_rain'
          return
@@ -777,7 +779,7 @@ contains
 
 
 
-      k_core = khi
+      k_core = khi+1
       has_core = .false.
       if (debug) write(*,*) 'set_dXi: (k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)): '
       do k = klo, khi
@@ -788,12 +790,21 @@ contains
          if (k == k_core) then
             if (verbose) write(*,*) 'set_dXi: k_core reached, exiting loop'
             exit
-
             ! If there is no core and we are below the rain threshold,
             ! we already transferred all mass fractions to the miscible value
             ! TODO: fix this check to robustly handle k_core
          elseif (.not. has_core .and. k > k_rain) then
             if (verbose) write(*,*) 'set_dXi: no core and k > k_rain, exiting loop'
+            exit
+
+         elseif (k + 1 == k_core) then
+            ! we are one cell above the core and still immiscible.
+            ! the only way forward is to saturate the core
+            call transfer_Xi(s, Xi_temp, Xi_miscible_max_monotonic, k, k_rain+1, k-1, ierr)
+            if (ierr /= 0) then
+               write(*,*) 'set_dXi: error in transfer_Xi for edge case k + 1 == k_core'
+               return
+            end if
             exit
          end if
 
@@ -804,30 +815,34 @@ contains
          if (rain_condition) then
 
             ! if the mass fraction is in the immiscible region, transfer it to the deposite below
-            call transfer_Xi(s, Xi_temp, Xi_miscible_min_monotonic, k, k+1, k_core, ierr)
-            if (ierr /= 0) return
+            call transfer_Xi(s, Xi_temp, Xi_miscible_min_monotonic, k, k+1, k_core-1, ierr)
+            if (ierr /= 0) then
+               write(*,*) 'set_dXi: error in transfer_Xi for rain condition'
+               return
+            end if
 
             ! make sure that after the transfer, none of the mass fractions are greater than the miscible maximum
-            if (any((Xi_temp(k+1:k_core) > Xi_miscible_max_monotonic(k+1:k_core)) .and. (Xi_miscible_max_monotonic(k+1:k_core) >= 0d0))) then
+            if (any((Xi_temp(k+1:k_core-1) > Xi_miscible_max_monotonic(k+1:k_core-1)) .and. (Xi_miscible_max_monotonic(k+1:k_core-1) >= 0d0))) then
 
                has_core = .true.
                k_core_old = k_core
 
                if (debug) write(*,*) achar(9), 'k_rain, k+1, k_core_old', k_rain, k+1, k_core_old
-               do j = k_core_old, k+1, -1
-                  if (Xi_temp(j) > Xi_miscible_max_monotonic(j)) then
+               do j = k_core_old-1, k+1, -1
+                  if (Xi_temp(j) > Xi_miscible_max_monotonic(j) .and. Xi_miscible_max_monotonic(j) >= 0d0) then
                      k_core = j
                      if (debug) write(*,*) 'core oversaturated: j, Xi_temp, Xi_miscible_max_monotonic, k_core', j, Xi_temp(j), Xi_miscible_max_monotonic(j), k_core
-                     
+
                      if (k_rain + 1 == j) then
-                        k_rain = k_rain - 1
-                        write(*,*) 'set_dXi: k_rain adjusted to ', k_rain, ' because k_rain == j = ', j
+                        call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, k_rain - 1, k_rain, ierr)
+                        if ( ierr /= 0 ) return
+                        if (debug) write(*,*) 'set_dXi: k_rain adjusted to ', k_rain, ' because k_rain == j = ', j
                      end if
 
                      ! transfer the excess mass fraction to the miscible maximum
                      call transfer_Xi(s, Xi_temp, Xi_miscible_max_monotonic, j, k_rain+1, j-1, ierr)
                      if (ierr /= 0) then
-                        write(*,*) 'set_dXi: error in transfer_Xi'
+                        write(*,*) 'set_dXi: error in transfer_Xi for oversaturated core'
                         return
                      end if
                   else
@@ -1009,47 +1024,6 @@ contains
 
       end subroutine enforce_monotonicity
 
-      subroutine find_k_rain(is_miscible, klo, khi, k_rain, ierr)
-         ! finds the last index k_rain inside (klo,khi) where the the model is immiscible outside the core
-         ! this is used to determine where to deposite helium
-         logical, allocatable, intent(in) :: is_miscible(:)  ! miscible regions
-         integer, intent(in) :: klo, khi  ! region in which we search for the last index k_rain
-         integer, intent(out) :: k_rain  ! index of the last cell where the model is immiscible outside the core
-         integer, intent(out) :: ierr  ! error code
-
-         ! local variables
-         integer :: k, k_end
-         logical :: inside_core
-         ierr = 0 ! 0 means AOK
-
-         ! if there is no k_core, we have to start from the bottom
-         inside_core = .not. is_miscible(khi)  ! whether we are inside the core
-         do k = khi, klo, -1
-            if (is_miscible(k) .and. inside_core) then
-               inside_core = .false.  ! we are now outside the core
-            else if (.not. is_miscible(k) .and. .not. inside_core) then
-               k_rain = k  ! we found the last index where the model is immiscible outside the core
-               if (debug) then
-                  write(*,*) 'find_k_rain: found k_rain: ', k_rain
-                  write(*,*) 'klo, khi: ', klo, khi
-               end if
-               return
-            end if
-         end do
-
-         ! if you reach this point, it means that the model is miscible everywhere outside the core
-
-         k_rain = 0
-
-         if (debug) then
-            write(*,*) 'find_k_rain: model is miscible everywhere outside the core'
-            write(*,*) 'klo, khi: ', klo, khi
-            write(*,*) 'k_rain set to: ', k_rain
-         end if
-
-
-      end subroutine find_k_rain
-
       subroutine find_k_core(is_miscible, klo, khi, k_core, ierr)
          ! finds the outermost index k_core of a potential core inside (klo,khi)
          ! if there is no core, returns -1
@@ -1133,6 +1107,80 @@ contains
       end if
 
    end subroutine find_RCB
+
+   subroutine find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, klo, khi, k_rain, ierr)
+      ! finds the last index k_rain inside (klo,khi) where the the model is immiscible outside the core
+      ! this is used to determine where to deposite helium
+      type (star_info), pointer :: s
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_min_monotonic(:)  ! miscible element mass fraction, monotonically increasing
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically decreasing
+      logical, allocatable, intent(in) :: is_miscible(:)  ! miscible regions
+      integer, intent(in) :: klo, khi  ! region in which we search for the last index k_rain
+      integer, intent(out) :: k_rain  ! index of the last cell where the model is immiscible outside the core
+      integer, intent(out) :: ierr  ! error code
+
+      ! local variables
+      integer :: k, k_end
+      logical :: inside_core, is_cell_saturated
+      ierr = 0 ! 0 means AOK
+
+      ! if there is no k_core, we have to start from the bottom
+      ! first, we need to find out if we are inside the core
+
+      inside_core = is_inside_core(s, is_miscible, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, khi)
+
+      do k = khi, klo, -1
+         is_cell_saturated = is_saturated(s, is_miscible, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, k)
+         if (is_miscible(k) .and. inside_core .and. .not. is_cell_saturated) then
+            inside_core = .false.  ! we are now outside the core
+         else if (.not. is_miscible(k) .and. .not. inside_core) then
+            k_rain = k  ! we found the last index where the model is immiscible outside the core
+            if (debug) then
+               write(*,*) 'find_k_rain: found k_rain: ', k_rain
+               write(*,*) 'klo, khi: ', klo, khi
+            end if
+            return
+         end if
+      end do
+
+      ! if you reach this point, it means that the model is miscible everywhere outside the core
+
+      k_rain = klo-1  ! set k_rain to klo-1, meaning that there is no immiscible region outside the core
+
+      if (debug) then
+         write(*,*) 'find_k_rain: model is miscible everywhere outside the core'
+         write(*,*) 'klo, khi: ', klo, khi
+         write(*,*) 'k_rain set to: ', k_rain
+      end if
+
+   contains
+
+      logical function is_inside_core(s, is_miscible, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, k)
+         ! Returns .true. if cell k is inside the core
+         ! there are two ways of being inside the core:
+         ! 1. the last cell is immiscible. In this case, there is no core yet, but one will form
+         ! 2. the cell is miscible, but greater than Xi_miscible_max. In that case, a core already exists.
+         type (star_info), intent(in) :: s
+         logical, intent(in) :: is_miscible(:)
+         real(kind=dp), intent(in) :: Xi_miscible_min_monotonic(:)
+         real(kind=dp), intent(in) :: Xi_miscible_max_monotonic(:)
+         integer, intent(in) :: k
+
+         is_inside_core = (.not. is_miscible(k)) .or. is_saturated(s, is_miscible, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, k)
+      end function is_inside_core
+
+      logical function is_saturated(s, is_miscible, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, k)
+         type (star_info), intent(in) :: s
+         logical, intent(in) :: is_miscible(:)
+         real(kind=dp), intent(in) :: Xi_miscible_min_monotonic(:)
+         real(kind=dp), intent(in) :: Xi_miscible_max_monotonic(:)
+         integer, intent(in) :: k
+
+         is_saturated = (is_miscible(k) .and. Xi_miscible_max_monotonic(k) >= 0d0 .and. Xi_miscible_max_monotonic(k) < s% xa(i_Xi, k))
+      end function is_saturated
+
+
+   end subroutine find_k_rain
 
    subroutine check_abundance_array(Xi, check_range, monotonicity_method, ierr)
       real(kind=dp), intent(in) :: Xi(:)
