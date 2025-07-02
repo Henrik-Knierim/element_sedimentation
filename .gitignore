@@ -34,9 +34,11 @@
 
 # Henrik's additional files
 *.code-workspace
+debug.txt
 star
 png
 photos
 LOGS
+restart_photo
 .mesa_temp_cache
 *.yml
