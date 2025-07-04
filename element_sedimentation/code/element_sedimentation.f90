@@ -384,169 +384,70 @@ contains
       deallocate(a, b, c, f_n, f_np1)
    end subroutine backward_Euler_step
 
-   ! subroutine do_bottom_up_rain(s,  ierr)
-   !    type (star_info), pointer :: s
-   !    integer :: i
-   !    integer, intent(out) :: ierr
+   subroutine do_bottom_up_rain(s,  ierr)
+      type (star_info), pointer :: s
+      integer :: i
+      integer, intent(out) :: ierr
 
-   !    integer, parameter :: max_iterations = 10000
-   !    integer :: j
-   !    integer :: klo, khi, k_mix, k, k_update
+      integer, parameter :: max_iterations = 10
+      integer :: j, k
 
-   !    integer :: k_debug
-   !    real(kind=dp), allocatable :: xa_pre(:,:)
-   !    real(kind=dp) :: X, Y, Z
+      ! debugging
+      integer :: k_debug
+      real(kind=dp), allocatable :: xa_pre(:,:)
+      real(kind=dp), allocatable :: dXi(:)  ! change in the element's mass fraction
+      logical, allocatable :: is_miscible(:)  ! miscible regions
+      include 'formats'
 
-   !    type(immiscibility_region), allocatable :: precipitating_regions(:)
+      ierr = 0 ! 0 means AOK
 
-   !    include 'formats'
+      allocate(xa_pre(size(s%xa, 1), size(s%xa, 2)))
 
-   !    ierr = 0 ! 0 means AOK
+      ! in the instant rain method, we transfer all the abundaces at once
+      ! this can lead to a region raining out that previously was not raining out
+      ! thus, we need to loop until we find no significant change in the element's mass fraction
+      do j=1, max_iterations
 
-   !    allocate(xa_pre(size(s%xa, 1), size(s%xa, 2)))
+         if (verbose) write(*,*) 'do_instant_rain: iteration: ', j
+         xa_pre = s%xa
 
-   !    do j=1, max_iterations
+         call get_dXi(s, dXi, is_miscible, ierr)
+         if (ierr /= 0) then
+            write(*,*) 'do_instant_rain: error in get_dXi'
+            if (allocated(dXi)) deallocate(dXi)
+            if (allocated(is_miscible)) deallocate(is_miscible)
+            return
+         end if
 
-   !       if (verbose) write(*,*) 'do_bottom_up_rain: iteration: ', j
-   !       xa_pre = s% xa
+         ! if dXi is not allocated, no precipitating regions were found; exit the loop
+         if (.not. allocated(dXi)) then
+            if (verbose) write(*,1) 'do_instant_rain: no precipitating region found.'
+            return
+         end if
 
-   !       ! determine the precipitating region
-   !       ! if allocated, deallocate precipitating regions
-   !       if (allocated(precipitating_regions)) deallocate(precipitating_regions)
-   !       call determine_precipitating_regions(s, precipitating_regions, ierr)
-   !       if (ierr /= 0) return
-   !       if (.not. allocated(precipitating_regions)) then
-   !          if (verbose) write(*,1) 'do_bottom_up_rain: no precipitating region found.'
-   !          return
-   !       end if
+         ! in the bottom-up algorithm, we transport the material one by one
+          ! Set dXi to zero except the first non-zero entry
+         first_nonzero = minloc(abs(dXi) > 0d0, dim=1)
+         dXi(first_nonzero+1: s% nz) = 0d0
+         
 
+         call adjust_mass_fractions(s, dXi(1:s% nz), ierr)
 
+         ! check mass fraction conservation
+         call check_after_rain(s, 1, s% nz, xa_pre, ierr)
 
-   !       ! determine the upper convective element reservoir
-   !       call determine_top_reservoirs(s, precipitating_regions, ierr)
-   !       if (ierr /= 0) then
-   !          write(*,*) 'do_bottom_up_rain: error in determine_top_reservoirs'
-   !          return
-   !       endif
+         ! call adjust_mixing_in_sedimenting_region(s, is_miscible, ierr)
 
-   !       ! determine deposit region
-   !       call determine_deposites(s, precipitating_regions, ierr)
-   !       if (ierr /= 0) then
-   !          write(*,*) 'do_bottom_up_rain: error in determine_deposites'
-   !          return
-   !       endif
+         deallocate(dXi, is_miscible)
 
-   !       call check_precipitating_regions(precipitating_regions, ierr)
-   !       if (ierr /= 0) then
-   !          write(*,*) 'do_bottom_up_rain: error in check_precipitating_regions'
-   !          return
-   !       endif
+         if (all(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi,1:s% nz)) < small)) exit
 
-   !       do i = 1, size(precipitating_regions)
+      end do
 
-   !          ! the differnce to instant rain: we change the abundances cell-by-cell
-   !          klo = precipitating_regions(i)% klo
-   !          khi = precipitating_regions(i)% khi
-
-   !          ! as long as we are raining down, we don't need to determine the top reservoir
-   !          ! case 1: We are inside the raining region (klo /= khi)
-   !          ! Set all changes in dXi except the lowest cell equal to zero
-   !          ! no need to adjust the top reservoir (yet)
-   !          if (klo /= khi) then
-   !             if (debug) write(*,*) 'precipitating_regions(i)%dXi(klo:khi): ', precipitating_regions(i)%dXi(klo:khi)
-   !             k_mix = khi
-   !             do k = khi, klo, -1
-   !                if (abs(precipitating_regions(i)%dXi(k)) < sedimentation_threshold) then
-   !                   precipitating_regions(i)%dXi(k) = 0d0
-   !                   k_mix = k - 1
-   !                else
-   !                   exit
-   !                end if
-   !             end do
-
-   !             if (k_mix < 1 .or. k_mix > s% nz) then
-   !                ierr = 1
-   !                write(*,*) 'do_bottom_up_rain: k_mix is out of bounds: ', k_mix
-   !                write(*,*) 'do_bottom_up_rain: klo, khi: ', klo, khi
-   !                return
-   !             end if
-   !             k_update = k_mix
-   !             precipitating_regions(i)%dXi(1:k_mix-1) = 0d0
-   !             if (debug) write(*,*) 'precipitating_regions(i)%dXi(klo:khi): ', precipitating_regions(i)%dXi(klo:khi)
-   !          else
-   !             k_update = precipitating_regions(i)% k_reservoir_lo
-   !          end if
+      deallocate(xa_pre)
 
 
-   !          call set_top_reservoir_abundance_change(s,  precipitating_regions(i), ierr)
-   !          if (ierr /= 0) then
-   !             write(*,*) 'do_bottom_up_rain: error in set_top_reservoir_abundance_change'
-   !             return
-   !          endif
-
-   !          call set_deposit_region_abundance_change(s,  precipitating_regions(i), ierr)
-   !          if (ierr /= 0) then
-   !             write(*,*) 'do_bottom_up_rain: error in set_deposit_region_abundance_change'
-   !             return
-   !          endif
-
-   !          if ( debug ) then
-   !             do k_debug = 1, s% nz
-   !                call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
-   !                write(*,2) 'do_bottom_up_rain: (k, X, Y, Z, dXi): ', &
-   !                   k_debug, X, Y, Z, &
-   !                   precipitating_regions(i)%dXi(k_debug)
-   !             end do
-   !          end if
-
-   !          call adjust_mass_fractions(s, precipitating_regions(i)% dXi, ierr)
-   !          if (ierr /= 0) then
-   !             write(*,*) 'do_bottom_up_rain: error in adjust_mass_fractions'
-   !             return
-   !          end if
-
-   !          if ( debug ) then
-   !             write(*,*) 'do_bottom_up_rain: after setting the abundances:'
-   !             do k_debug = 1, s% nz
-   !                call get_mass_fractions(s, s% xa(:,k_debug), X, Y, Z)
-   !                write(*,2) 'do_bottom_up_rain: (k, X, Y, Z): ', &
-   !                   k_debug, X, Y, Z
-   !             end do
-   !          end if
-
-   !          ! check mass fraction conservation
-   !          if ( debug ) then
-   !             call monitor_mass_fractions(s,  precipitating_regions(i), ierr)
-   !          end if
-
-   !          call update_model_(s, k_update, s% nz, .true.)
-
-   !       end do
-
-   !       if ( verbose ) then
-   !          k_debug = maxloc(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi, 1:s% nz)), dim=1)
-   !          write(*,*) 'maximum difference: (k, val)', k_debug,  abs(s%xa(i_Xi, k_debug)-xa_pre(i_Xi, k_debug))
-   !       end if
-
-   !       if (all(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi,1:s% nz)) < sedimentation_threshold)) exit
-
-   !    end do
-
-   !    call check_after_rain(s, precipitating_regions, xa_pre, ierr)
-   !    if (ierr /= 0) then
-   !       write(*,*) 'do_bottom_up_rain: error in check_after_rain'
-   !       return
-   !    end if
-   !    call adjust_mixing_in_sedimenting_region(s, precipitating_regions, ierr)
-   !    if (ierr /= 0) then
-   !       write(*,*) 'do_bottom_up_rain: error in adjust_mixing_in_sedimenting_region'
-   !       return
-   !    end if
-   !    deallocate(xa_pre, precipitating_regions)
-
-
-
-   ! end subroutine do_bottom_up_rain
+   end subroutine do_bottom_up_rain
 
    subroutine do_instant_rain(s, ierr)
       type (star_info), pointer :: s
@@ -910,7 +811,7 @@ contains
                         call reduce_Xi_difference(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, k_core-1, ierr)
                         if (ierr /= 0) return
                      end if
-                     
+
                      exit
                   end if
                end do
