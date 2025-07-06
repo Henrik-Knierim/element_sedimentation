@@ -22,7 +22,7 @@ module element_sedimentation
    real(dp), parameter :: tiny = 1d-10
    real(dp), parameter :: very_small = 1d-6
    real(dp), parameter :: small = 1d-4
-   real(dp), parameter :: sedimentation_threshold = 1d-4   ! ignore sedimentation if the change in the mass fraction is smaller than this value
+
    real(dp), parameter :: temperature_shift = 0d0
    character(len=32), parameter :: phase_diagram_elements(2) = [character(len=32) :: 'h1', 'he4']
 
@@ -33,6 +33,8 @@ module element_sedimentation
    logical :: debug_advection_diffusion_solver = .false.
    logical :: debug_number_fraction_scaling = .false.
    logical :: debug_phase_diagram = .false.
+   logical :: debug_set_dXi = .false.
+   logical :: debug_bottom_up_rain = .true.
    logical :: verbose = .true.
    logical :: custom_debug = .false. ! for dirty debugging
    logical :: extrapolate = .false.
@@ -135,7 +137,7 @@ contains
        case (instant_rain)
          call do_instant_rain(s, ierr)
        case (bottom_up_rain)
-         ! call do_bottom_up_rain(s, ierr)
+         call do_bottom_up_rain(s, ierr)
        case (advection_diffusion_rain)
          ! call do_advection_diffusion_rain(s, ierr)
        case default
@@ -388,15 +390,17 @@ contains
       type (star_info), pointer :: s
       integer :: i
       integer, intent(out) :: ierr
-
-      integer, parameter :: max_iterations = 10
-      integer :: j, k
+      integer :: k
 
       ! debugging
       integer :: k_debug
       real(kind=dp), allocatable :: xa_pre(:,:)
       real(kind=dp), allocatable :: dXi(:)  ! change in the element's mass fraction
+      real(kind=dp) :: dXi_max
       logical, allocatable :: is_miscible(:)  ! miscible regions
+      integer :: k_update
+      real(kind=dp) :: dXi_debug
+
       include 'formats'
 
       ierr = 0 ! 0 means AOK
@@ -406,48 +410,82 @@ contains
       ! in the instant rain method, we transfer all the abundaces at once
       ! this can lead to a region raining out that previously was not raining out
       ! thus, we need to loop until we find no significant change in the element's mass fraction
-      do j=1, max_iterations
 
-         if (verbose) write(*,*) 'do_instant_rain: iteration: ', j
-         xa_pre = s%xa
+      xa_pre = s%xa
 
-         call get_dXi(s, dXi, is_miscible, ierr)
+      do k_update = s% nz, 1, -1
+
+         if ( debug_bottom_up_rain ) write(*,*) 'do_bottom_up_rain: k_update: ', k_update
+
+         call get_dXi(s, k_update, s% nz, dXi, is_miscible, ierr)
          if (ierr /= 0) then
-            write(*,*) 'do_instant_rain: error in get_dXi'
+            write(*,*) 'do_bottom_up_rain: error in get_dXi'
             if (allocated(dXi)) deallocate(dXi)
             if (allocated(is_miscible)) deallocate(is_miscible)
             return
          end if
 
-         ! if dXi is not allocated, no precipitating regions were found; exit the loop
          if (.not. allocated(dXi)) then
-            if (verbose) write(*,1) 'do_instant_rain: no precipitating region found.'
-            return
+            cycle
          end if
 
-         ! in the bottom-up algorithm, we transport the material one by one
-          ! Set dXi to zero except the first non-zero entry
-         first_nonzero = minloc(abs(dXi) > 0d0, dim=1)
-         dXi(first_nonzero+1: s% nz) = 0d0
-         
-
          call adjust_mass_fractions(s, dXi(1:s% nz), ierr)
+         if (ierr /= 0) then
+            write(*,*) 'do_bottom_up_rain: error in adjust_mass_fractions'
+            deallocate(dXi, is_miscible)
+            return
+         end if
 
          ! check mass fraction conservation
          call check_after_rain(s, 1, s% nz, xa_pre, ierr)
 
-         ! call adjust_mixing_in_sedimenting_region(s, is_miscible, ierr)
+         ! adjust model after mixing
+         call update_model_(s, k_update, s% nz, .true.)
 
          deallocate(dXi, is_miscible)
 
-         if (all(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi,1:s% nz)) < small)) exit
-
       end do
+
+
+      ! call adjust_mixing_in_sedimenting_region(s, is_miscible, ierr)
+
+
+
 
       deallocate(xa_pre)
 
-
    end subroutine do_bottom_up_rain
+
+   integer function first_nonzero_element(x)
+      ! finds the first non-zero element in the array x
+      real(kind=dp), intent(in) :: x(:)
+      integer :: i
+
+      first_nonzero_element = -1  ! default value if no non-zero element is found
+      do i = 1, size(x)
+         if (abs(x(i)) > 0d0) then
+            first_nonzero_element = i
+            return
+         end if
+      end do
+   end function first_nonzero_element
+
+   integer function last_nonzero_element(x)
+      ! finds the last non-zero element in the array x
+      real(kind=dp), intent(in) :: x(:)
+      integer :: i
+
+      last_nonzero_element = -1  ! default value if no non-zero element is found
+      do i = size(x), 1, -1
+         if (abs(x(i)) > 0d0) then
+            last_nonzero_element = i
+            return
+         end if
+      end do
+   end function last_nonzero_element
+
+
+
 
    subroutine do_instant_rain(s, ierr)
       type (star_info), pointer :: s
@@ -476,7 +514,7 @@ contains
          if (verbose) write(*,*) 'do_instant_rain: iteration: ', j
          xa_pre = s%xa
 
-         call get_dXi(s, dXi, is_miscible, ierr)
+         call get_dXi(s, 1, s%nz, dXi, is_miscible, ierr)
          if (ierr /= 0) then
             write(*,*) 'do_instant_rain: error in get_dXi'
             if (allocated(dXi)) deallocate(dXi)
@@ -558,9 +596,10 @@ contains
       end if
    end subroutine check_after_rain
 
-   subroutine get_raw_miscibility(s, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
+   subroutine get_raw_miscibility(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       ! miscibility without any post-processing
       type(star_info), pointer :: s
+      integer, intent(in) :: klo, khi  ! range of zones to consider
       real(kind=dp), allocatable, intent(out) :: Xi_miscible_min(:), Xi_miscible_max(:)   ! miscible element mass fraction
       logical, allocatable, intent(out) :: is_miscible(:)  ! miscible regions
 
@@ -572,11 +611,15 @@ contains
       integer :: op_err, ierr
 
       ierr = 0 ! 0 means AOK
+      
       ! set up arrays
-      allocate(Xi_miscible_min(s% nz), Xi_miscible_max(s% nz), is_miscible(s% nz), yi_miscible_min(s% nz), yi_miscible_max(s% nz))
+      ! we need to evaluate the entire range later
+      ! however, only values ranging from klo to khi are checked for miscibility
+      allocate(Xi_miscible_min(1:s% nz), Xi_miscible_max(1:s% nz), yi_miscible_min(1:s% nz), yi_miscible_max(1:s% nz), source = -1d0)
+      allocate(is_miscible(1:s% nz), source =.true.)  ! miscible regions
 
       !$OMP PARALLEL DO PRIVATE(k, yi,  op_err) SCHEDULE(guided)
-      do k = 1, s% nz
+      do k = klo, khi
 
          op_err = 0  ! Each thread gets its own local copy of ierr
          call get_scaled_number_fractions(s, s% xa(:, k), yi, op_err)
@@ -600,8 +643,9 @@ contains
 
    end subroutine get_raw_miscibility
 
-   subroutine get_dXi(s, dXi, is_miscible, ierr)
+   subroutine get_dXi(s, klo, khi, dXi, is_miscible, ierr)
       type (star_info), pointer :: s
+      integer, intent(in) :: klo, khi  ! range of zones to consider
       real(kind = dp), allocatable, intent(out) :: dXi(:)  ! difference between the miscible and the actual element mass fraction
       logical, allocatable, intent(out) :: is_miscible(:)  ! miscible regions
       integer, intent(out) :: ierr
@@ -611,12 +655,11 @@ contains
       real(kind=dp), allocatable :: Xi_miscible_min(:), Xi_miscible_max(:)
       integer :: k_debug ! utils
 
-      call get_raw_miscibility(s, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
+      call get_raw_miscibility(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       if (ierr /= 0) then
          write(*,*) 'get_precipitating_bounds: error in get_raw_miscibility'
          return
       end if
-
 
       ! if is_miscible is .true. everywhere, we don't need to do anything
       if (all(is_miscible)) then
@@ -625,7 +668,7 @@ contains
       end if
 
       ! get the difference between the miscible and the actual element mass fraction in the precipitating region
-      call set_dXi(s, Xi_miscible_min, Xi_miscible_max, is_miscible, 1, s% nz, dXi, ierr)
+      call set_dXi(s, is_miscible, Xi_miscible_min, Xi_miscible_max, 1, s% nz, dXi, ierr)
 
    end subroutine get_dXi
 
@@ -667,7 +710,7 @@ contains
 
    end function is_at_miscibility_edge
 
-   subroutine set_dXi(s, Xi_miscible_min, Xi_miscible_max, is_miscible, klo, khi, dXi, ierr)
+   subroutine set_dXi(s, is_miscible, Xi_miscible_min, Xi_miscible_max, klo, khi, dXi, ierr)
       type (star_info), pointer :: s
       real(kind=dp), allocatable, intent(in) :: Xi_miscible_min(:), Xi_miscible_max(:)  ! miscible element mass fraction
       logical, allocatable, intent(in) :: is_miscible(:)  ! miscible regions
@@ -679,72 +722,34 @@ contains
       real(kind=dp), allocatable :: Xi_temp(:)  ! temporary array to hold the mass fractions
       real(kind=dp), allocatable :: Xi_miscible_min_monotonic(:)  ! miscible element mass fraction, monotonically increasing
       real(kind=dp), allocatable :: Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically decreasing
-      integer :: k, j, k_core, k_core_old, k_rain, k_RCB
-      logical :: rain_condition
+      integer :: k, j, k_core, k_rain, k_RCB
+      logical :: it_rains
       logical :: has_core  ! whether we have a core
 
       ierr = 0 ! 0 means AOK
 
       allocate(Xi_temp(klo:khi), source=s% xa(i_Xi, klo:khi))
-      allocate(Xi_miscible_min_monotonic(klo:khi), source=Xi_miscible_min(klo:khi))
-      allocate(Xi_miscible_max_monotonic(klo:khi), source=Xi_miscible_max(klo:khi))
 
-      call find_RCB(s, klo, khi, k_RCB, ierr)
-      if (ierr/=0) return
-
-      if (debug) write(*,*) 'set_dXi: enforce monotonicity for Xi_miscible_min_monotonic'
-
-      call enforce_monotonicity(Xi_miscible_min_monotonic, k_RCB, khi, enforce_monotonicity_bottom_up, ierr)
+      call init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_core, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
       if (ierr /= 0) then
-         write(*,*) 'set_dXi: error in enforce_monotonicity for Xi_miscible_min_monotonic'
+         write(*,*) 'set_dXi: error in init_set_dXi'
          return
       end if
 
-      if (debug) write(*,*) 'set_dXi: enforce monotonicity for Xi_miscible_max_monotonic'
-
-      call enforce_monotonicity(Xi_miscible_max_monotonic, k_RCB, khi, enforce_monotonicity_top_down, ierr)
-      if (ierr /= 0) then
-         write(*,*) 'set_dXi: error in enforce_monotonicity for Xi_miscible_max_monotonic'
-         return
-      end if
-
-      ! TODO: Make sure Xi_miscible_max_monotonic >= Xi_miscible_min_monotonic
-
-      if (damp_sedimentation) then
-         call reduce_Xi_difference(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, khi, ierr)
-         if (ierr /= 0) return
-      end if
-
-      call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, khi, k_rain, ierr)
-      if (ierr /= 0) then
-         write(*,*) 'set_dXi: error in find_k_rain'
-         return
-      end if
-
-      k_core = khi+1
       has_core = .false.
-      if (debug) write(*,*) 'set_dXi: (k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)): '
+      if (debug_set_dXi) write(*,*) 'set_dXi: (k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)): '
       do k = k_RCB, khi
 
-         if (debug) write(*,'(i12,l5,99(1pd26.16))') &
+         if (debug_set_dXi) write(*,'(i12,l5,99(1pd26.16))') &
             k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)
 
-         if (k == k_core) then
-            if (verbose) write(*,*) 'set_dXi: k_core reached, exiting loop'
-            exit
-            ! If there is no core and we are below the rain threshold,
-            ! we already transferred all mass fractions to the miscible value
-            ! TODO: fix this check to robustly handle k_core
-         elseif (.not. has_core .and. k > k_rain) then
-            if (verbose) write(*,*) 'set_dXi: no core and k > k_rain, exiting loop'
-            exit
-         end if
+         if (should_exit_loop(k, k_core, k_rain, has_core)) exit
 
-         rain_condition = (Xi_temp(k) > Xi_miscible_min_monotonic(k)) & ! we are above the minimum mixture
+         it_rains = (Xi_temp(k) > Xi_miscible_min_monotonic(k)) & ! we are above the minimum mixture
             .and. (Xi_miscible_min_monotonic(k) >= 0d0)  ! the miscible limit is not -1
          !.and. (Xi_temp(k) < Xi_miscible_max_monotonic(k) .or. Xi_miscible_max_monotonic(k) <= 0d0) & ! we are below the maximum mixture
 
-         if (rain_condition) then
+         if (it_rains) then
 
             if (k + 1 == k_core) then
                ! we are one cell above the core and still immiscible.
@@ -766,55 +771,9 @@ contains
 
             ! make sure that after the transfer, none of the mass fractions are greater than the miscible maximum
             if (any((Xi_temp(k+1:k_core-1) > Xi_miscible_max_monotonic(k+1:k_core-1)) .and. (Xi_miscible_max_monotonic(k+1:k_core-1) >= 0d0))) then
-
                has_core = .true.
-               k_core_old = k_core
-
-               if (debug) write(*,*) achar(9), 'k_rain, k+1, k_core_old', k_rain, k+1, k_core_old
-               do j = k_core_old-1, k+1, -1
-                  if (Xi_temp(j) > Xi_miscible_max_monotonic(j) .and. Xi_miscible_max_monotonic(j) >= 0d0) then
-                     k_core = j
-                     if (debug) write(*,*) 'core oversaturated: j, Xi_temp, Xi_miscible_max_monotonic, k_core', j, Xi_temp(j), Xi_miscible_max_monotonic(j), k_core
-
-                     if (k_rain + 1 == j) then
-                        call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, k_rain - 1, k_rain, ierr)
-                        if ( ierr /= 0 ) return
-                        if (debug) write(*,*) 'set_dXi: k_rain adjusted to ', k_rain, ' because k_rain == j = ', j
-                     end if
-
-                     ! transfer the excess mass fraction to the miscible maximum
-                     call transfer_Xi(s, Xi_temp, Xi_miscible_max_monotonic, j, k_rain+1, j-1, ierr)
-                     if (ierr /= 0) then
-                        write(*,*) 'set_dXi: error in transfer_Xi for oversaturated core'
-                        return
-                     end if
-                  else
-
-                     if (debug) write(*,*) 'exit core: k_core', k_core
-
-                     if (k_rain + 1 == j) then
-                        call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, k_rain - 1, k_rain, ierr)
-                        if ( ierr /= 0 ) return
-                        if (debug) write(*,*) 'set_dXi: k_rain adjusted to ', k_rain, ' because k_rain == j = ', j
-                     end if
-
-
-                     Xi_miscible_min_monotonic(klo:khi) = Xi_miscible_min(klo:khi)
-                     Xi_miscible_max_monotonic(klo:khi) = Xi_miscible_max(klo:khi)
-                     call enforce_monotonicity(Xi_miscible_min_monotonic, k_RCB, k_core-1, enforce_monotonicity_bottom_up, ierr)
-                     if (ierr /= 0) return
-
-                     call enforce_monotonicity(Xi_miscible_max_monotonic, k_RCB, k_core-1, enforce_monotonicity_top_down, ierr)
-                     if (ierr /= 0) return
-
-                     if (damp_sedimentation) then
-                        call reduce_Xi_difference(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, k_core-1, ierr)
-                        if (ierr /= 0) return
-                     end if
-
-                     exit
-                  end if
-               end do
+               call saturate_core(s, k, klo, khi, k_RCB, k_rain, k_core, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_temp, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+               if (ierr /= 0) return
             end if
 
          end if
@@ -822,7 +781,7 @@ contains
 
       ! if there is a core, we homogenize the mass fraction one last time
       if (has_core) then
-         if (debug) write(*,*) 'set_dXi: homogenizing region: ', k_rain+1, k_core-1
+         if (debug_set_dXi) write(*,*) 'set_dXi: homogenizing region: ', k_rain+1, k_core-1
          call homogenize_region(s, Xi_temp, k_rain+1, k_core-1, ierr)
          if ( ierr /= 0 ) return
       end if
@@ -830,18 +789,28 @@ contains
       ! homogenize convective envelope
       do k = k_RCB, k_core-1
          if (is_at_miscibility_edge(Xi_temp(k), is_miscible(k), Xi_miscible_min(k), Xi_miscible_max(k))) then
-            if (debug) write(*,*) 'set_dXi: homogenizing region (k_RCB, k): ', k_RCB, k-1
+            if (debug_set_dXi) write(*,*) 'set_dXi: homogenizing region (k_RCB, k): ', k_RCB, k-1
             call homogenize_region(s, Xi_temp, k_RCB, k-1, ierr)
             if (ierr /= 0) return
+
+            if (debug_set_dXi) then
+               call check_abundance_array(Xi_temp(k_RCB:khi), .true., monotonic_increase, ierr)
+               if (ierr /= 0) then
+                  write(*,*) 'set_dXi: error in check_abundance_array after homogenization'
+                  call mesa_error(__FILE__,__LINE__)
+               end if
+            end if
+
             exit
          end if
       end do
 
       ! now, we compute the difference between the miscible and the actual element mass fraction in the region klo:khi
+      if (allocated(dXi)) deallocate(dXi)
       allocate(dXi(klo:khi), source = 0d0)
       dXi(klo:khi) = Xi_temp(klo:khi) - s% xa(i_Xi, klo:khi)
 
-      if ( debug ) then
+      if ( debug_set_dXi ) then
          write(*,*) ''
          write(*,*) 'After set_dXi:'
          write(*,*) 'klo, khi: ', klo, khi
@@ -857,189 +826,287 @@ contains
       deallocate(Xi_miscible_min_monotonic)
       deallocate(Xi_miscible_max_monotonic)
 
-   contains
+   end subroutine set_dXi
 
-      subroutine transfer_Xi(s, Xi, Xi_ref, k, klo, khi, ierr)
-         ! transfers the mass fraction Xi_ref(k)-Xi(k) to the region klo:khi
-         ! Although many of these parameters are present in the parent scope, we pass them to avoid confusion
-         type (star_info), pointer :: s
-         real(kind=dp), intent(inout) :: Xi(:)  ! element mass fraction
-         real(kind=dp), intent(in) :: Xi_ref(:)  ! reference element mass fraction
-         integer, intent(in) :: k  ! index of the element mass fraction to transfer
-         integer, intent(in) :: klo, khi  ! region in which we transfer the element mass fraction
-         integer, intent(out) :: ierr  ! error code
+   subroutine saturate_core(s, k, klo, khi, k_RCB, k_rain, k_core, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+      ! saturates the core of the star, i.e. the region where the element mass fraction is above the miscible maximum
+      type (star_info), pointer :: s
+      integer, intent(in) :: k  ! index of the last zone in the core
+      integer, intent(in) :: klo, khi  ! entire modelling range
+      integer, intent(in) :: k_RCB  ! index of the radiative-convective boundary
+      integer, intent(inout) :: k_rain  ! index of the first zone in the rain
+      integer, intent(inout) :: k_core  ! index of the core
+      logical, allocatable, intent(in) :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_min(:), Xi_miscible_max(:)  ! miscible element mass fraction
+      real(kind=dp), allocatable, intent(inout) :: Xi(:)  ! element mass fraction
+      real(kind=dp), allocatable, intent(inout) :: Xi_miscible_min_monotonic(:), Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically increasing/decreasing
+      integer, intent(out) :: ierr  ! error code
 
-         ! local variables
-         real(kind=dp) :: dXi    ! difference between the reference and the current element mass fraction
-         real(kind=dp) :: dM_Xi  ! mass of the element that is transferred
-         real(kind=dp) :: M      ! total mass in the region klo:khi
+      ! local variables
+      integer :: j  ! loop index
+      integer :: k_core_old  ! old value of k_core
 
-         ierr = 0 ! 0 means AOK
+      ierr = 0 ! 0 means AOK
+      k_core_old = k_core
 
-         ! first, compute the difference between the reference and the current element mass fraction
-         dXi = Xi_ref(k) - Xi(k)
+      if (debug_set_dXi) write(*,*) 'saturate_core: k_rain, k+1, k_core_old', k_rain, k+1, k_core_old
+      do j = k_core_old-1, k+1, -1
+         if (Xi(j) > Xi_miscible_max_monotonic(j) .and. Xi_miscible_max_monotonic(j) >= 0d0) then
+            k_core = j
+            if (debug) write(*,*) 'core oversaturated: j, Xi_temp, Xi_miscible_max_monotonic, k_core', j, Xi(j), Xi_miscible_max_monotonic(j), k_core
 
-         ! next, adjust the element mass fraction in cell k
-         Xi(k) = Xi_ref(k)
+            if (k_rain + 1 == j) then
+               call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, k_rain - 1, k_rain, ierr)
+               if ( ierr /= 0 ) return
+               if (debug) write(*,*) 'set_dXi: k_rain adjusted to ', k_rain, ' because k_rain == j = ', j
+            end if
 
-         ! Now, we transfer the difference to the region klo:khi
-         dM_Xi = s% dm(k) * dXi     ! mass of the element that is transferred
-         M = sum(s% dm(klo:khi))    ! total mass in the region klo:khi
-
-         ! test that M is not zero
-         if (M <= 0d0) then
-            ierr = 1
-            write(*,*) 'transfer_Xi: total mass in the region klo:khi is zero or negative'
-            write(*,*) 'klo, khi: ', klo, khi
-            write(*,*) 'M: ', M
-            return
-         end if
-
-         ! now, we adjust the element mass fraction in the region klo:khi
-         Xi(klo:khi) = Xi(klo:khi) - dM_Xi / M
-
-      end subroutine transfer_Xi
-
-      subroutine homogenize_region(s, Xi, klo, khi, ierr)
-         ! homogenizes the element mass fraction Xi in the region klo:khi
-         type (star_info), pointer :: s
-         real(kind=dp), intent(inout) :: Xi(:)  ! element mass fraction
-         integer, intent(in) :: klo, khi  ! region to be homogenized
-         integer, intent(out) :: ierr  ! error code
-
-         ! local variables
-         real(kind=dp) :: M, M_Xi  ! total mass and total mass of the element in the region klo:khi
-         integer :: k
-
-         ierr = 0 ! 0 means AOK
-
-         M = sum(s% dm(klo:khi))  ! total mass in the region klo:khi
-         M_Xi = dot_product(s% dm(klo:khi), Xi(klo:khi))  ! total mass of the element in the region klo:khi
-
-         if (M <= 0d0) then
-            ierr = 1
-            write(*,*) 'homogenize_region: total mass in the region klo:khi is zero or negative'
-            write(*,*) 'klo, khi: ', klo, khi
-            write(*,*) 'M: ', M
-            return
-         end if
-
-         if ( M_Xi < 0d0 ) then
-            ierr = 1
-            write(*,*) 'homogenize_region: total mass of the element in the region klo:khi is negative'
-            write(*,*) 'klo, khi: ', klo, khi
-            write(*,*) 'M_Xi: ', M_Xi
-            return
-         end if
-
-         ! now, we homogenize the element mass fraction in the region klo:khi
-         Xi(klo:khi) = M_Xi / M
-
-      end subroutine homogenize_region
-
-      subroutine enforce_monotonicity(Xi, klo, khi, method, ierr)
-         ! this subroutine enforces monotonicity of the miscible element mass fraction Xi
-         real(kind=dp), allocatable, intent(inout) :: Xi(:)  ! miscible element mass fraction
-         integer, intent(in) :: klo, khi  ! indices of Xi to be checked
-         integer, intent(in) :: method  ! if true, enforce monotonicity from bottom to top, otherwise from top to bottom
-         ! typically, you want to start from the bottom for Xi_min and from the top for Xi_max
-         integer, intent(out) :: ierr
-
-         ! local variables
-         integer :: k
-         logical :: check_range = .false.
-         ierr = 0 ! 0 means AOK
-
-         if (debug) write(*,*) 'enforce_monotonicity: size(Xi), klo, khi, method: ', size(Xi), klo, khi, method
-
-         ! TODO: Optimize by finding the minimum/maximum value
-         if (method == enforce_monotonicity_bottom_up) then
-            do k = khi, klo+1, -1
-               if ( Xi(k) >= 0d0 .and. Xi(k-1) < 0d0 ) then
-                  Xi(k-1) = Xi(k)
-               else if ( Xi(k) < 0d0 ) then
-                  ! continue
-               else if (Xi(k) < Xi(k-1)) then
-                  if ( debug ) write(*,*) 'enforce_monotonicity: enforcing monotonicity at k, Xi(k-1), Xi(k) :', &
-                     k, Xi(k-1), Xi(k)
-                  Xi(k-1) = Xi(k)
-               end if
-            end do
-         else if (method == enforce_monotonicity_top_down) then
-            do k = klo+1, khi
-               if (Xi(k) < 0d0 .and. Xi(k-1) >= 0d0 ) then
-                  Xi(k) = Xi(k-1)
-               else if (Xi(k) < 0d0) then
-                  ! continue
-               else if (Xi(k) < Xi(k-1)) then
-                  if ( debug ) write(*,*) 'enforce_monotonicity: enforcing monotonicity at k, Xi(k), Xi(k-1):', &
-                     k, Xi(k), Xi(k-1)
-                  Xi(k) = Xi(k-1)
-               end if
-            end do
+            ! transfer the excess mass fraction to the miscible maximum
+            call transfer_Xi(s, Xi, Xi_miscible_max_monotonic, j, k_rain+1, j-1, ierr)
+            if (ierr /= 0) then
+               write(*,*) 'set_dXi: error in transfer_Xi for oversaturated core'
+               return
+            end if
          else
-            ierr = 1
-            write(*,*) 'enforce_monotonicity: unknown method: ', method
-            write(*,*) 'klo, khi: ', klo, khi
-            return
+
+            if (debug_set_dXi) write(*,*) 'exit core: k_core', k_core
+
+            if (k_rain + 1 == j) then
+               call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, k_rain - 1, k_rain, ierr)
+               if ( ierr /= 0 ) return
+               if (debug_set_dXi) write(*,*) 'set_dXi: k_rain adjusted to ', k_rain, ' because k_rain == j = ', j
+            end if
+
+            call adjust_miscibility_gap(s, klo, khi, k_RCB, k_core-1, is_miscible, Xi_miscible_min, Xi_miscible_max, &
+               Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+
+            exit
          end if
+      end do
 
-         call check_abundance_array(Xi(klo:khi), check_range, monotonic_increase, ierr)
-         if (ierr /= 0) then
-            write(*,*) 'enforce_monotonicity: error in check_abundance_array'
-            return
-         end if
+   end subroutine saturate_core
 
-      end subroutine enforce_monotonicity
+   subroutine homogenize_region(s, Xi, klo, khi, ierr)
+      ! homogenizes the element mass fraction Xi in the region klo:khi
+      type (star_info), pointer :: s
+      real(kind=dp), intent(inout) :: Xi(:)  ! element mass fraction
+      integer, intent(in) :: klo, khi  ! region to be homogenized
+      integer, intent(out) :: ierr  ! error code
 
-      subroutine find_k_core(is_miscible, klo, khi, k_core, ierr)
-         ! finds the outermost index k_core of a potential core inside (klo,khi)
-         ! if there is no core, returns -1
-         logical, allocatable, intent(in) :: is_miscible(:)  ! miscible regions
-         integer, intent(in) :: klo, khi  ! region in which we search for
-         integer, intent(out) :: k_core  ! index of the outermost cell of the core
-         integer, intent(out) :: ierr  ! error code
-         real(kind=dp) :: dHp
+      ! local variables
+      real(kind=dp) :: M, M_Xi  ! total mass and total mass of the element in the region klo:khi
+      integer :: k
 
-         ierr = 0 ! 0 means AOK
+      ierr = 0 ! 0 means AOK
 
-         ! if (is_miscible(khi)) then
-         !    k_core = -1  ! no core found
-         !    if (debug) then
-         !       write(*,*) 'find_k_core: no core found'
-         !       write(*,*) 'klo, khi: ', klo, khi
-         !       write(*,*) 'k_core set to -1'
-         !    end if
-         !    return
-         ! endif
+      M = sum(s% dm(klo:khi))  ! total mass in the region klo:khi
+      M_Xi = dot_product(s% dm(klo:khi), Xi(klo:khi))  ! total mass of the element in the region klo:khi
 
-         k_core = -1
-         do k = khi, klo, -1
-            dHp = pressure_scale_height_distance(s, k, khi)
+      if (M <= 0d0) then
+         ierr = 1
+         write(*,*) 'homogenize_region: total mass in the region klo:khi is zero or negative'
+         write(*,*) 'klo, khi: ', klo, khi
+         write(*,*) 'M: ', M
+         return
+      end if
 
-            if (.not. is_miscible(k) .and. all(is_miscible(k-5:k-1)) .and. dHp >= minimal_pressure_scale_height) then
-               ! check that the next 5 cells are miscible
-               k_core = k
-               exit
-            else if (dHp >= minimal_pressure_scale_height .and. all(is_miscible(k-5:k-1))) then
-               exit
+      if ( M_Xi < 0d0 ) then
+         ierr = 1
+         write(*,*) 'homogenize_region: total mass of the element in the region klo:khi is negative'
+         write(*,*) 'klo, khi: ', klo, khi
+         write(*,*) 'M_Xi: ', M_Xi
+         return
+      end if
+
+      ! now, we homogenize the element mass fraction in the region klo:khi
+      Xi(klo:khi) = M_Xi / M
+
+   end subroutine homogenize_region
+
+   subroutine enforce_monotonicity(Xi, klo, khi, method, ierr)
+      ! this subroutine enforces monotonicity of the miscible element mass fraction Xi
+      real(kind=dp), allocatable, intent(inout) :: Xi(:)  ! miscible element mass fraction
+      integer, intent(in) :: klo, khi  ! indices of Xi to be checked
+      integer, intent(in) :: method  ! if true, enforce monotonicity from bottom to top, otherwise from top to bottom
+      ! typically, you want to start from the bottom for Xi_min and from the top for Xi_max
+      integer, intent(out) :: ierr
+
+      ! local variables
+      integer :: k
+      logical :: check_range = .false.
+      ierr = 0 ! 0 means AOK
+
+      if (debug_set_dXi) write(*,*) 'enforce_monotonicity: size(Xi), klo, khi, method: ', size(Xi), klo, khi, method
+
+      ! TODO: Optimize by finding the minimum/maximum value
+      if (method == enforce_monotonicity_bottom_up) then
+         do k = khi, klo+1, -1
+            if ( Xi(k) >= 0d0 .and. Xi(k-1) < 0d0 ) then
+               Xi(k-1) = Xi(k)
+            else if ( Xi(k) < 0d0 ) then
+               ! continue
+            else if (Xi(k) < Xi(k-1)) then
+               if ( debug ) write(*,*) 'enforce_monotonicity: enforcing monotonicity at k, Xi(k-1), Xi(k) :', &
+                  k, Xi(k-1), Xi(k)
+               Xi(k-1) = Xi(k)
             end if
          end do
+      else if (method == enforce_monotonicity_top_down) then
+         do k = klo+1, khi
+            if (Xi(k) < 0d0 .and. Xi(k-1) >= 0d0 ) then
+               Xi(k) = Xi(k-1)
+            else if (Xi(k) < 0d0) then
+               ! continue
+            else if (Xi(k) < Xi(k-1)) then
+               if ( debug ) write(*,*) 'enforce_monotonicity: enforcing monotonicity at k, Xi(k), Xi(k-1):', &
+                  k, Xi(k), Xi(k-1)
+               Xi(k) = Xi(k-1)
+            end if
+         end do
+      else
+         ierr = 1
+         write(*,*) 'enforce_monotonicity: unknown method: ', method
+         write(*,*) 'klo, khi: ', klo, khi
+         return
+      end if
 
-         ! do k = khi, klo, -1
-         !    dHp = pressure_scale_height_distance(s, k_end, khi)
-         !    if (is_miscible(k) .and. dHp >= minimal_pressure_scale_height) then
-         !       k_core = k+1  ! we found the outermost index of the core
-         !       if (debug) then
-         !          write(*,*) 'find_k_core: found k_core: ', k_core
-         !          write(*,*) 'klo, khi: ', klo, khi
-         !       end if
-         !       return
-         !    end if
-         ! end do
-      end subroutine find_k_core
+      call check_abundance_array(Xi(klo:khi), check_range, monotonic_increase, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'enforce_monotonicity: error in check_abundance_array'
+         return
+      end if
 
-   end subroutine set_dXi
+   end subroutine enforce_monotonicity
+
+   subroutine adjust_miscibility_gap(s, klo, khi, k_start, k_end, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+      ! sets the abundance profiles for the miscible element
+      type (star_info), pointer :: s
+      integer, intent(in) :: klo, khi  ! region in which we transfer the element
+      integer, intent(in) :: k_start, k_end  ! subregion for which we ensure monotonicity
+      logical, allocatable,  intent(in) :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_min(:)  ! miscible element mass fraction
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_max(:)  ! miscible element mass fraction
+      real(kind=dp), allocatable, intent(out) :: Xi_miscible_min_monotonic(:)  ! miscible element mass fraction, monotonically increasing
+      real(kind=dp), allocatable, intent(out) :: Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically decreasing
+      integer, intent(out) :: ierr  ! error code
+
+      ierr = 0 ! 0 means AOK
+
+      if (allocated(Xi_miscible_min_monotonic)) deallocate(Xi_miscible_min_monotonic)
+      if (allocated(Xi_miscible_max_monotonic)) deallocate(Xi_miscible_max_monotonic)
+      allocate(Xi_miscible_min_monotonic(klo:khi), source=Xi_miscible_min(klo:khi))
+      allocate(Xi_miscible_max_monotonic(klo:khi), source=Xi_miscible_max(klo:khi))
+
+      call enforce_monotonicity(Xi_miscible_min_monotonic, k_start, k_end, enforce_monotonicity_bottom_up, ierr)
+      if (ierr /= 0) return
+
+      call enforce_monotonicity(Xi_miscible_max_monotonic, k_start, k_end, enforce_monotonicity_top_down, ierr)
+      if (ierr /= 0) return
+
+      if (damp_sedimentation) then
+         call reduce_Xi_difference(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_start, k_end, ierr)
+         if (ierr /= 0) return
+      end if
+
+   end subroutine adjust_miscibility_gap
+
+   logical function should_exit_loop(k, k_core, k_rain, has_core)
+      ! checks whether we should exit the loop in set_dXi
+      integer, intent(in) :: k  ! current index
+      integer, intent(in) :: k_core  ! index of the core
+      integer, intent(in) :: k_rain  ! index of the rain threshold
+      logical, intent(in) :: has_core  ! whether we have a core
+
+      should_exit_loop = .false.
+
+      ! we reached the core. Nothing more to do.
+      if (k == k_core) then
+         if (debug_set_dXi) write(*,*) 'set_dXi: k_core reached, exiting loop'
+         should_exit_loop = .true.
+         ! If there is no core and we are below the rain threshold,
+         ! we already transferred all mass fractions to the miscible value
+         ! TODO: fix this check to robustly handle k_core
+
+         ! We rained out all the material above the rain threshold. Nothing more to do.
+      elseif (.not. has_core .and. k > k_rain) then
+         if (debug_set_dXi) write(*,*) 'set_dXi: no core and k > k_rain, exiting loop'
+         should_exit_loop = .true.
+      end if
+   end function
+
+   subroutine init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_core, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+      ! initializes the parameters for set_dXi
+      type (star_info), pointer :: s
+      integer, intent(in) :: klo, khi  ! region in which we transfer the element
+      logical, allocatable, intent(in) :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_min(:)
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_max(:)  ! miscible element mass fraction
+      integer, intent(out) :: k_RCB  ! index of the radiative-convective boundary
+      integer, intent(out) :: k_rain  ! index of the rain threshold
+      integer, intent(out) :: k_core  ! index of the core
+      real(kind=dp), allocatable, intent(inout) :: Xi_miscible_min_monotonic(:)  ! miscible element mass fraction, monotonically increasing
+      real(kind=dp), allocatable, intent(inout) :: Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically decreasing
+      integer, intent(out) :: ierr  ! error code
+
+      call find_RCB(s, klo, khi, k_RCB, ierr)
+      if (ierr/=0) return
+
+      call adjust_miscibility_gap(s, klo, khi, k_RCB, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'init_set_dXi: error in adjust_miscibility_gap'
+         return
+      end if
+
+      call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, khi, k_rain, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'set_dXi: error in find_k_rain'
+         return
+      end if
+
+      k_core = khi+1
+
+   end subroutine init_set_dXi
+
+   subroutine transfer_Xi(s, Xi, Xi_ref, k, klo, khi, ierr)
+      ! transfers the mass fraction Xi_ref(k)-Xi(k) to the region klo:khi
+      ! Although many of these parameters are present in the parent scope, we pass them to avoid confusion
+      type (star_info), pointer :: s
+      real(kind=dp), intent(inout) :: Xi(:)  ! element mass fraction
+      real(kind=dp), intent(in) :: Xi_ref(:)  ! reference element mass fraction
+      integer, intent(in) :: k  ! index of the element mass fraction to transfer
+      integer, intent(in) :: klo, khi  ! region in which we transfer the element mass fraction
+      integer, intent(out) :: ierr  ! error code
+
+      ! local variables
+      real(kind=dp) :: dXi    ! difference between the reference and the current element mass fraction
+      real(kind=dp) :: dM_Xi  ! mass of the element that is transferred
+      real(kind=dp) :: M      ! total mass in the region klo:khi
+
+      ierr = 0 ! 0 means AOK
+
+      ! first, compute the difference between the reference and the current element mass fraction
+      dXi = Xi_ref(k) - Xi(k)
+
+      ! next, adjust the element mass fraction in cell k
+      Xi(k) = Xi_ref(k)
+
+      ! Now, we transfer the difference to the region klo:khi
+      dM_Xi = s% dm(k) * dXi     ! mass of the element that is transferred
+      M = sum(s% dm(klo:khi))    ! total mass in the region klo:khi
+
+      ! test that M is not zero
+      if (M <= 0d0) then
+         ierr = 1
+         write(*,*) 'transfer_Xi: total mass in the region klo:khi is zero or negative'
+         write(*,*) 'klo, khi: ', klo, khi
+         write(*,*) 'M: ', M
+         return
+      end if
+
+      ! now, we adjust the element mass fraction in the region klo:khi
+      Xi(klo:khi) = Xi(klo:khi) - dM_Xi / M
+
+   end subroutine transfer_Xi
 
    subroutine find_RCB(s, klo, khi, k_RCB, ierr)
       ! finds the radiative-convective boundary (RCB) in the region (klo, khi)
@@ -1052,7 +1119,7 @@ contains
       integer :: k
 
       ierr = 0 ! 0 means AOK
-
+      k_RCB = -1  ! initialize to -1, meaning that we haven't found the RCB yet
       do k = klo, khi
          if ( s% mixing_type(k) /= no_mixing) then
             k_RCB = k  ! we found the RCB
@@ -1060,17 +1127,21 @@ contains
          end if
       end do
 
+      if ( k_RCB == -1 ) then
+         ! no RCB found, use the entire region as the RCB
+         k_RCB = klo
+      end if
+
       if ( k_RCB < klo .or.k_RCB > khi) then
          ierr = 1
          write(*,*) 'find_RCB: RCB out of bounds'
          write(*,*) 'klo, khi, k_RCB: ', klo, khi, k_RCB
+         return
       end if
 
-      if ( debug ) then
+      if ( debug_set_dXi ) then
          if (k_RCB > 0) then
             write(*,*) 'find_RCB: found RCB at k: ', k_RCB
-         else
-            write(*,*) 'find_RCB: no RCB found in the region (klo, khi)'
          end if
       end if
 
@@ -1115,7 +1186,7 @@ contains
 
       k_rain = klo-1  ! set k_rain to klo-1, meaning that there is no immiscible region outside the core
 
-      if (debug) then
+      if (debug_set_dXi) then
          write(*,*) 'find_k_rain: model is miscible everywhere outside the core'
          write(*,*) 'klo, khi: ', klo, khi
          write(*,*) 'k_rain set to: ', k_rain
