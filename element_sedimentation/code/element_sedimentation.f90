@@ -14,6 +14,7 @@ module element_sedimentation
    public :: shutdown_phase_diagram
    public :: do_element_sedimentation
 
+   integer :: sedimentation_method = -1
    integer, parameter :: instant_rain = 0
    integer, parameter :: bottom_up_rain = 1
    integer, parameter :: advection_diffusion_rain = 2
@@ -34,8 +35,8 @@ module element_sedimentation
    logical :: debug_number_fraction_scaling = .false.
    logical :: debug_phase_diagram = .false.
    logical :: debug_set_dXi = .false.
-   logical :: debug_bottom_up_rain = .true.
-   logical :: verbose = .true.
+   logical :: debug_bottom_up_rain = .false.
+   logical :: verbose = .false.
    logical :: custom_debug = .false. ! for dirty debugging
    logical :: extrapolate = .false.
    logical :: damp_sedimentation ! originally, damping was determined via do_gentle_mixing. Since gentle_mixing is not officially supported, I decided to make this module self-contained.
@@ -105,7 +106,6 @@ contains
    subroutine do_element_sedimentation(s, ierr)
 
       type (star_info), pointer :: s
-      integer :: method ! 0: instant rain, 1: constant velocity rain
       integer, intent(out) :: ierr
 
       ierr = 0 ! 0 means AOK
@@ -120,11 +120,11 @@ contains
       ! we first assign the method and then select the correct subroutine
       ! to be able to reference the method in the subroutine later if needed (currently not the case)
       if (trim(s% element_sedimentation_method) == 'instant_rain') then
-         method = instant_rain
+         sedimentation_method = instant_rain
       else if (trim(s% element_sedimentation_method) == 'bottom_up_rain') then
-         method = bottom_up_rain
+         sedimentation_method = bottom_up_rain
       else if (trim(s% element_sedimentation_method) == 'advection_diffusion_rain') then
-         method = advection_diffusion_rain
+         sedimentation_method = advection_diffusion_rain
       else
          ierr = 1
          write(*,*) 'do_element_sedimentation: unknown method for element sedimentation: ', trim(s% element_sedimentation_method)
@@ -133,7 +133,7 @@ contains
 
       damp_sedimentation = (s% element_sedimentation_maximum_dXi_per_cell > 0d0)
 
-      select case (method)
+      select case (sedimentation_method)
        case (instant_rain)
          call do_instant_rain(s, ierr)
        case (bottom_up_rain)
@@ -583,7 +583,7 @@ contains
          ! TODO: Only check monotonicity in radiative regions.
          ! ? The error probably arises from ommiting mixing
          ! call find_RCB(s, klo, khi, k_RCB, ierr)
-         call check_abundance_array(s% xa(i, klo:khi), check_range, monotonicity_method, ierr, mask = (s% mixing_type(klo:khi)/=no_mixing))
+         call check_abundance_array(s% xa(i, 1:s% nz), klo, khi, check_range, monotonicity_method, ierr, mask = (s% mixing_type(klo:khi)/=no_mixing))
       end do
 
       if ( verbose ) then
@@ -611,7 +611,7 @@ contains
       integer :: op_err, ierr
 
       ierr = 0 ! 0 means AOK
-      
+
       ! set up arrays
       ! we need to evaluate the entire range later
       ! however, only values ranging from klo to khi are checked for miscibility
@@ -737,10 +737,10 @@ contains
       end if
 
       has_core = .false.
-      if (debug_set_dXi) write(*,*) 'set_dXi: (k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)): '
+      if (custom_debug) write(*,*) 'set_dXi: (k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)): '
       do k = k_RCB, khi
 
-         if (debug_set_dXi) write(*,'(i12,l5,99(1pd26.16))') &
+         if (custom_debug) write(*,'(i12,l5,99(1pd26.16))') &
             k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)
 
          if (should_exit_loop(k, k_core, k_rain, has_core)) exit
@@ -750,6 +750,7 @@ contains
          !.and. (Xi_temp(k) < Xi_miscible_max_monotonic(k) .or. Xi_miscible_max_monotonic(k) <= 0d0) & ! we are below the maximum mixture
 
          if (it_rains) then
+            if (debug_set_dXi) write(*,*) 'set_dXi: raining at k = ', k
 
             if (k + 1 == k_core) then
                ! we are one cell above the core and still immiscible.
@@ -781,36 +782,34 @@ contains
 
       ! if there is a core, we homogenize the mass fraction one last time
       if (has_core) then
-         if (debug_set_dXi) write(*,*) 'set_dXi: homogenizing region: ', k_rain+1, k_core-1
+         if (debug_set_dXi) write(*,*) 'set_dXi: homogenizing region (k_rain+1, k_core-1): ', k_rain+1, k_core-1
          call homogenize_region(s, Xi_temp, k_rain+1, k_core-1, ierr)
          if ( ierr /= 0 ) return
+
+         if (debug_set_dXi) then
+            call check_abundance_array(Xi_temp, k_rain+1, khi, .true., monotonic_increase, ierr)
+            if (ierr /= 0) then
+               write(*,*) 'set_dXi: error in check_abundance_array after homogenization of the core'
+               call mesa_error(__FILE__,__LINE__)
+            end if
+         end if
       end if
 
       ! homogenize convective envelope
-      do k = k_RCB, k_core-1
-         if (is_at_miscibility_edge(Xi_temp(k), is_miscible(k), Xi_miscible_min(k), Xi_miscible_max(k))) then
-            if (debug_set_dXi) write(*,*) 'set_dXi: homogenizing region (k_RCB, k): ', k_RCB, k-1
-            call homogenize_region(s, Xi_temp, k_RCB, k-1, ierr)
-            if (ierr /= 0) return
-
-            if (debug_set_dXi) then
-               call check_abundance_array(Xi_temp(k_RCB:khi), .true., monotonic_increase, ierr)
-               if (ierr /= 0) then
-                  write(*,*) 'set_dXi: error in check_abundance_array after homogenization'
-                  call mesa_error(__FILE__,__LINE__)
-               end if
-            end if
-
-            exit
+      if (sedimentation_method == instant_rain .or. klo == 1 ) then
+         call homogenize_convective_envelope(s, is_miscible, Xi_miscible_min, Xi_miscible_max, klo, khi, Xi_temp, ierr)
+         if (ierr /= 0) then
+            write(*,*) 'set_dXi: error in homogenize_convective_envelope'
+            return
          end if
-      end do
+      end if
 
       ! now, we compute the difference between the miscible and the actual element mass fraction in the region klo:khi
       if (allocated(dXi)) deallocate(dXi)
       allocate(dXi(klo:khi), source = 0d0)
       dXi(klo:khi) = Xi_temp(klo:khi) - s% xa(i_Xi, klo:khi)
 
-      if ( debug_set_dXi ) then
+      if ( custom_debug ) then
          write(*,*) ''
          write(*,*) 'After set_dXi:'
          write(*,*) 'klo, khi: ', klo, khi
@@ -827,6 +826,43 @@ contains
       deallocate(Xi_miscible_max_monotonic)
 
    end subroutine set_dXi
+
+   subroutine homogenize_convective_envelope(s, is_miscible, Xi_miscible_min, Xi_miscible_max, klo, khi, Xi, ierr)
+      type (star_info), pointer :: s
+      logical, allocatable, intent(in) :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_min(:), Xi_miscible_max(:)  ! miscible element mass fraction
+      integer, intent(in) :: klo, khi  ! range of zones to consider
+      real(kind=dp), allocatable, intent(inout) :: Xi(:)  ! element mass fraction
+      integer, intent(out) :: ierr  ! error code
+
+      integer :: k_RCB  ! index of the radiative-convective boundary
+      integer :: k_core  ! index of the core
+      integer :: k  ! loop index
+
+      call find_RCB(s, klo, khi, k_RCB, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'homogenize_convective_envelope: error in find_RCB'
+         return
+      end if
+
+      do k = k_RCB+1, khi
+         if (is_at_miscibility_edge(Xi(k), is_miscible(k), Xi_miscible_min(k), Xi_miscible_max(k))) then
+            if (debug_set_dXi) write(*,*) 'set_dXi: homogenizing region (k_RCB, k): ', k_RCB, k-1
+            call homogenize_region(s, Xi, k_RCB, k-1, ierr)
+            if (ierr /= 0) return
+
+            if (debug_set_dXi) then
+               call check_abundance_array(Xi, k_RCB, khi, .true., monotonic_increase, ierr)
+               if (ierr /= 0) then
+                  write(*,*) 'set_dXi: error in check_abundance_array after homogenization'
+                  call mesa_error(__FILE__,__LINE__)
+               end if
+            end if
+            exit
+         end if
+      end do
+
+   end subroutine homogenize_convective_envelope
 
    subroutine saturate_core(s, k, klo, khi, k_RCB, k_rain, k_core, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
       ! saturates the core of the star, i.e. the region where the element mass fraction is above the miscible maximum
@@ -970,7 +1006,7 @@ contains
          return
       end if
 
-      call check_abundance_array(Xi(klo:khi), check_range, monotonic_increase, ierr)
+      call check_abundance_array(Xi, klo, khi, check_range, monotonic_increase, ierr)
       if (ierr /= 0) then
          write(*,*) 'enforce_monotonicity: error in check_abundance_array'
          return
@@ -1000,15 +1036,53 @@ contains
       call enforce_monotonicity(Xi_miscible_min_monotonic, k_start, k_end, enforce_monotonicity_bottom_up, ierr)
       if (ierr /= 0) return
 
+      call debugging_abundance_array_check(debug_set_dXi,&
+         'adjust_miscibility_gap: error in check_abundance_array after enforce_monotonicity (min)', &
+         Xi_miscible_min_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_min_monotonic /= -1d0)
+
       call enforce_monotonicity(Xi_miscible_max_monotonic, k_start, k_end, enforce_monotonicity_top_down, ierr)
       if (ierr /= 0) return
+
+      call debugging_abundance_array_check(debug_set_dXi,&
+         'adjust_miscibility_gap: error in check_abundance_array after damping Xi (max)', &
+         Xi_miscible_max_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_max_monotonic /= -1d0)
 
       if (damp_sedimentation) then
          call reduce_Xi_difference(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_start, k_end, ierr)
          if (ierr /= 0) return
+
+         call debugging_abundance_array_check(debug_set_dXi,&
+            'adjust_miscibility_gap: error in check_abundance_array after damping Xi (min)', &
+            Xi_miscible_min_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_min_monotonic /= -1d0)
+
+         call debugging_abundance_array_check(debug_set_dXi,&
+            'adjust_miscibility_gap: error in check_abundance_array after damping Xi (max)', &
+            Xi_miscible_max_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_max_monotonic /= -1d0)
+
       end if
 
    end subroutine adjust_miscibility_gap
+
+   subroutine debugging_abundance_array_check(debug,  message, Xi, klo, khi, check_range, monotonicity_method, ierr, mask)
+      logical, intent(in) :: debug  ! whether to print debugging information
+      character(len=*), intent(in) :: message  ! message to print
+      real(kind=dp), intent(in) :: Xi(:)  ! element mass fraction
+      integer, intent(in) :: klo, khi  ! region in which we check the abundance array
+      logical, intent(in) :: check_range  ! whether to check the range of the abundance array
+      integer, intent(in) :: monotonicity_method  ! method to check monotonicity
+      integer, intent(out) :: ierr  ! error code
+      logical, intent(in), optional :: mask(:)  ! mask to apply to the abundance array
+
+      if (.not. debug) return
+
+      call check_abundance_array(Xi, klo, khi, .true., monotonicity_method, ierr, mask)
+      if (ierr /= 0) then
+         write(*,*) trim(message)
+         call mesa_error(__FILE__,__LINE__)
+      end if
+
+
+   end subroutine debugging_abundance_array_check
 
    logical function should_exit_loop(k, k_core, k_rain, has_core)
       ! checks whether we should exit the loop in set_dXi
@@ -1028,9 +1102,9 @@ contains
          ! TODO: fix this check to robustly handle k_core
 
          ! We rained out all the material above the rain threshold. Nothing more to do.
-      elseif (.not. has_core .and. k > k_rain) then
-         if (debug_set_dXi) write(*,*) 'set_dXi: no core and k > k_rain, exiting loop'
-         should_exit_loop = .true.
+      ! elseif (.not. has_core .and. k > k_rain) then
+      !    if (debug_set_dXi) write(*,*) 'set_dXi: no core and k > k_rain, exiting loop'
+      !    should_exit_loop = .true.
       end if
    end function
 
@@ -1228,8 +1302,9 @@ contains
       both_radiative = (s%mixing_type(k) == no_mixing) .and. (s% mixing_type(j) == no_mixing)
    end function both_radiative
 
-   subroutine check_abundance_array(Xi, check_range, monotonicity_method, ierr, mask)
+   subroutine check_abundance_array(Xi, klo, khi, check_range, monotonicity_method, ierr, mask)
       real(kind=dp), intent(in) :: Xi(:)
+      integer, intent(in) :: klo, khi  ! indices of Xi to be checked
       logical, intent(in) :: check_range
       integer, intent(in) :: monotonicity_method
       logical, intent(in), optional :: mask(:)
@@ -1246,21 +1321,40 @@ contains
       if (present(mask)) then
          local_mask = mask
       else
-         allocate(local_mask(size(Xi)))
+         allocate(local_mask(size(Xi(klo:khi))))
          local_mask = .true.
       end if
 
-      if (check_range .and. any(Xi < 0d0 .or. Xi > 1d0)) then
+      if (check_range .and. any((Xi(klo:khi) < 0d0 .or. Xi(klo:khi) > 1d0) .and. local_mask(klo:khi))) then
          ierr = 1
          write(*,*) 'check_abundance_array: Xi contains values outside of [0, 1]'
+
+         if (allocated(op_err)) deallocate(op_err)
+         allocate(op_err(size(Xi)), source=0)
+
+         !$OMP PARALLEL DO PRIVATE(k) SCHEDULE(guided)
+         do k = klo, khi-1
+            if ((Xi(k) < 0d0 .or. (Xi(k) > 1d0)) .and. local_mask(k)) then
+               op_err(k) = 1
+            end if
+         end do
+         !$OMP END PARALLEL DO
+
+         write(*,*) achar(9),'k, Xi(k), /= -1d0:'
+         do k = klo, khi
+            if (op_err(k) /= 0) write(*,*) achar(9), k, Xi(k), Xi(k) /= -1d0, local_mask(k)
+         end do
 
          return
       end if
 
       if (monotonicity_method==monotonic_increase) then
+
+         if (allocated(op_err)) deallocate(op_err)
          allocate(op_err(size(Xi)), source=0)
+
          !$OMP PARALLEL DO PRIVATE(k) SCHEDULE(guided)
-         do k = 1, size(Xi)-1
+         do k = klo, khi-1
             if ((Xi(k)-Xi(k+1))/Xi(k+1) > very_small .and. (local_mask(k) .and. local_mask(k+1))) then
                op_err(k) = 1
             end if
@@ -1271,7 +1365,7 @@ contains
 
             write(*,*) 'check_abundance_array: Xi is not monotonically increasing'
             write(*,*) 'k, Xi(k), Xi(k+1): '
-            do k = 1, size(Xi)-1
+            do k = klo, khi-1
                if (op_err(k) > 0) then
                   write(*,*) k, Xi(k), Xi(k+1)
                end if
@@ -1282,9 +1376,12 @@ contains
          end if
 
       else if (monotonicity_method==monotonic_decrease) then
+
+         if (allocated(op_err)) deallocate(op_err)
          allocate(op_err(size(Xi)), source=0)
+
          !$OMP PARALLEL DO PRIVATE(k) SCHEDULE(guided)
-         do k = 1, size(Xi)-1
+         do k = klo, khi-1
             if ((Xi(k)-Xi(k+1))/Xi(k+1) < -very_small .and. (local_mask(k) .and. local_mask(k+1))) then
                op_err(k) = 1
             end if
@@ -1295,7 +1392,7 @@ contains
 
             write(*,*) 'check_abundance_array: Xi is not monotonically decreasing'
             write(*,*) 'k, Xi(k), Xi(k+1): '
-            do k = 1, size(Xi)-1
+            do k = klo, khi-1
                if (op_err(k) > 0) then
                   write(*,*) k, Xi(k), Xi(k+1)
                end if
@@ -1314,6 +1411,7 @@ contains
 
       ! Clean up local mask if it was allocated
       if (allocated(local_mask)) deallocate(local_mask)
+      if (allocated(op_err)) deallocate(op_err)
 
    end subroutine check_abundance_array
 
