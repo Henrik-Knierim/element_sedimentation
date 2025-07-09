@@ -42,3 +42,4 @@ LOGS
 restart_photo
 .mesa_temp_cache
 *.yml
+element_sedimentation/backup/

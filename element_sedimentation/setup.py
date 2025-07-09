@@ -20,6 +20,7 @@ install_info = {
     "alloc.f90": {"mesa_path": "star/private", "replace": False},
     "ctrls_io.f90": {"mesa_path": "star/private", "replace": False},
     "evolve.f90": {"mesa_path": "star/private", "replace": False},
+    "hydro_energy.f90": {"mesa_path": "star/private", "replace": False},
     "init.f90": {"mesa_path": "star/private", "replace": False},
     NEW_FILE_NAME: {"mesa_path": "star/private", "replace": True},
     # # star_data/private

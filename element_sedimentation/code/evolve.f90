@@ -7,7 +7,7 @@
                ! HHK: element sedimentation
                if (s% do_element_sedimentation) then
                   do k = 1, s% nz
-                     s% eps_element_sedimentation(k) = s% energy(k)
+                     s% energy_start(k) = s% energy(k)
                   end do
                   call do_element_sedimentation(s, ierr)
                   if (failed('do_element_sedimentation')) return
@@ -15,7 +15,7 @@
                   call set_vars_if_needed(s, dt, 'after element sedimentation', ierr)
                   if (failed('set_vars_if_needed after element sedimentation')) return
                   do k=1,s% nz ! for use by energy equation
-                     s% eps_element_sedimentation(k) = (s% eps_element_sedimentation(k) - s% energy(k)) / dt
+                     s% eps_element_sedimentation(k) = (s% energy_start(k) - s% energy(k)) / dt
                   end do
                end if
 ! anchor = 's% total_energy_from_phase_separation = 0d0'; prepend

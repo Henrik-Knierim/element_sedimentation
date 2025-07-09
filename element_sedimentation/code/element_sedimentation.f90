@@ -40,6 +40,7 @@ module element_sedimentation
    logical :: custom_debug = .false. ! for dirty debugging
    logical :: extrapolate = .false.
    logical :: damp_sedimentation ! originally, damping was determined via do_gentle_mixing. Since gentle_mixing is not officially supported, I decided to make this module self-contained.
+   logical :: precipitated = .false.
 
    ! monotonicity methods
    integer, parameter :: enforce_monotonicity_bottom_up = -1
@@ -62,6 +63,7 @@ module element_sedimentation
    type advection_diffusion_state
       integer :: nz  ! number of zones
       real(kind=dp) :: dt  ! time step
+      real(kind=dp) :: tau_settle, tau_conv
       real(kind=dp), allocatable :: D(:), v(:)
       real(kind=dp), allocatable :: dr(:), Xi(:), dXi(:)  ! dXi is the change in the element's mass fraction
    end type advection_diffusion_state
@@ -133,6 +135,8 @@ contains
 
       damp_sedimentation = (s% element_sedimentation_maximum_dXi_per_cell > 0d0)
 
+      s% eps_element_sedimentation(1: s% nz) = 0d0  ! reset the element sedimentation energy release
+
       select case (sedimentation_method)
        case (instant_rain)
          call do_instant_rain(s, ierr)
@@ -146,7 +150,7 @@ contains
          return
       end select
 
-      call update_model_(s, 1, s% nz, .true.)
+      ! call update_model_(s, 1, s% nz, .true.)
       s% need_to_setvars = .true.
 
    end subroutine do_element_sedimentation
@@ -156,26 +160,43 @@ contains
       integer, intent(out) :: ierr
 
       ! local
-      integer, parameter :: max_iterations = 500
+      integer :: max_iterations
       integer :: i, j
+      real(kind=dp) :: h  ! heterogeneity
       type(advection_diffusion_state) :: adv_diff_state
 
       ierr = 0 ! 0 means AOK
 
+      ! initialize the advection-diffusion state
+      call init_advection_diffusion_state(s, adv_diff_state, ierr)
+      if (ierr /= 0) return
+
+      if (.not. precipitated .and. all(adv_diff_state% v == 0d0)) then
+         if (verbose) write(*,*) 'do_advection_diffusion_rain: no precipitating regions found, skipping advection-diffusion step'
+         call free_advection_diffusion_state(adv_diff_state)
+         return
+      else
+         precipitated = .true.
+      end if
+
+      max_iterations = max(adv_diff_state% tau_conv, adv_diff_state% tau_settle) / adv_diff_state% dt
+      if (verbose) write(*,*) 'do_advection_diffusion_rain: max_iterations = ', max_iterations
+      if (verbose) call print_advection_diffusion_state(adv_diff_state)
 
       do i = 1, max_iterations
-         if (verbose) write(*,*) 'do_advection_diffusion_rain: iteration: ', i
+         if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: iteration: ', i
 
          ! initialize the advection-diffusion state
          call init_advection_diffusion_state(s, adv_diff_state, ierr)
          if (ierr /= 0) return
 
+
          ! if adv_diff_state % v is not allocated, no precipitating regions were found; exit the loop
-         if (.not. allocated(adv_diff_state % v)) then
-            if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: no precipitating regions found, skipping advection-diffusion step'
-            call free_advection_diffusion_state(adv_diff_state)
-            exit
-         end if
+         ! if (.not. allocated(adv_diff_state % v) .and. i /= 1) then
+         !    if (verbose) write(*,*) 'do_advection_diffusion_rain: no precipitating regions found, skipping advection-diffusion step'
+         !    call free_advection_diffusion_state(adv_diff_state)
+         !    exit
+         ! end if
 
          ! perform the advection-diffusion step
          call backward_Euler_step(adv_diff_state, ierr)
@@ -183,21 +204,22 @@ contains
 
          if (debug_advection_diffusion_solver) then
             do j = 1, adv_diff_state%nz
-               write(*,*) 'do_advection_diffusion_rain: (k, Xi(k), dXi(k)) = ', j, adv_diff_state%Xi(j), adv_diff_state%dXi(j)
+               write(*,*) 'do_advection_diffusion_rain: (k, Xi(k), dXi(k)) = ', j, adv_diff_state% Xi(j), adv_diff_state% dXi(j)
             end do
          end if
 
          call adjust_mass_fractions(s, adv_diff_state% dXi, ierr)
 
          ! check if the change in the element's mass fraction is below a threshold
-         if (verbose) write(*,*) 'do_advection_diffusion_rain: max(|dXi|) = ', maxval(abs(adv_diff_state%dXi))
-         if (all(abs(adv_diff_state%dXi) < 1d-6)) then
-            if (verbose) write(*,*) 'do_advection_diffusion_rain: no significant change in element mass fraction'
-            exit
-         end if
+         h = heterogeneity(adv_diff_state% dXi, s% dm(1:s% nz))
+         if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: h, max(|dXi|) = ', h, maxval(abs(adv_diff_state% dXi))
+         ! if (h < 1d-8) then ! 2-5d-8
+         !    if (verbose) write(*,*) 'do_advection_diffusion_rain: no significant change in element mass fraction'
+         !    exit
+         ! end if
 
          call free_advection_diffusion_state(adv_diff_state)
-         call update_model_(s, 1, s% nz, .false.)
+         ! call update_model_(s, 1, s% nz, .false.)
       end do
 
       ! TODO: Adjust the mixing in the sedimenting region
@@ -206,6 +228,72 @@ contains
 
 
    end subroutine do_advection_diffusion_rain
+
+   subroutine print_advection_diffusion_state(adv_diff_state)
+      type(advection_diffusion_state), intent(in) :: adv_diff_state
+      integer :: i
+      integer :: n
+
+      n = min(10, size(adv_diff_state%D))
+
+      write(*,*) '=== Advection Diffusion State ==='
+      write(*,'(A,I0)') ' nz: ', adv_diff_state%nz
+      write(*,'(A,E12.5)') ' dt: ', adv_diff_state%dt
+      write(*,'(A,E12.5)') ' tau_settle: ', adv_diff_state%tau_settle
+      write(*,'(A,E12.5)') ' tau_conv: ', adv_diff_state%tau_conv
+      write(*,'(A,E12.5)') ' tau_settle/tau_conv: ', adv_diff_state%tau_settle/adv_diff_state%tau_conv
+      write(*,'(A,E12.5)') 'mean diffusion coefficient: ', dot_product(adv_diff_state%D, adv_diff_state%dr)/sum(adv_diff_state%dr)
+
+
+
+      ! if (allocated(adv_diff_state%D)) then
+      !    write(*,'(A)') ' D (diffusion coefficient):'
+      !    do i = 1, n
+      !       write(*,'(A,I4,A,E12.5)') '   D(', i, ') = ', adv_diff_state%D(i)
+      !    end do
+      ! else
+      !    write(*,'(A)') ' D: not allocated'
+      ! end if
+
+      ! if (allocated(adv_diff_state%v)) then
+      !    write(*,'(A)') ' v (velocity):'
+      !    do i = 1, n
+      !       write(*,'(A,I4,A,E12.5)') '   v(', i, ') = ', adv_diff_state%v(i)
+      !    end do
+      ! else
+      !    write(*,'(A)') ' v: not allocated'
+      ! end if
+
+      ! if (allocated(adv_diff_state%dr)) then
+      !    write(*,'(A)') ' dr (radial spacing):'
+      !    do i = 1, n
+      !       write(*,'(A,I4,A,E12.5)') '   dr(', i, ') = ', adv_diff_state%dr(i)
+      !    end do
+      ! else
+      !    write(*,'(A)') ' dr: not allocated'
+      ! end if
+
+      ! if (allocated(adv_diff_state%Xi)) then
+      !    write(*,'(A)') ' Xi (element mass fraction):'
+      !    do i = 1, n
+      !       write(*,'(A,I4,A,E12.5)') '   Xi(', i, ') = ', adv_diff_state%Xi(i)
+      !    end do
+      ! else
+      !    write(*,'(A)') ' Xi: not allocated'
+      ! end if
+
+      ! if (allocated(adv_diff_state%dXi)) then
+      !    write(*,'(A)') ' dXi (change in element mass fraction):'
+      !    do i = 1, n
+      !       write(*,'(A,I4,A,E12.5)') '   dXi(', i, ') = ', adv_diff_state%dXi(i)
+      !    end do
+      ! else
+      !    write(*,'(A)') ' dXi: not allocated'
+      ! end if
+
+      write(*,*) '================================='
+
+   end subroutine print_advection_diffusion_state
 
    subroutine init_advection_diffusion_state(s, adv_diff_state, ierr)
       type (star_info), pointer :: s
@@ -239,14 +327,20 @@ contains
          write(*,*) 'init_advection_diffusion_state: error in get_raw_miscibility'
          return
       end if
+      is_miscible (s%nz-2 : s%nz) = .true.  ! last two zones are always miscible for boundary condition reasons
+      ! dummy miscibility array
+      ! allocate(is_miscible(1:s% nz), source=.true.)  ! all regions are miscible by default
+      ! where (s% xa(i_Xi, s% nz-50:s% nz-2) > 0.2d0 .and. s% xa(i_Xi, s% nz-50:s% nz-2) < 0.9d0) is_miscible(s% nz-50:s% nz-2) = .false.
+      ! where (s% xa(i_Xi, s% nz-75:s% nz-50) > 0.2d0) is_miscible(s% nz-75:s% nz-50) = .false.
+
 
       ! if everything is miscible, we can skip the advection-diffusion step
-      if (all(is_miscible)) then
-         if (debug_advection_diffusion_solver) write(*,*) 'init_advection_diffusion_state: all regions are miscible, skipping advection-diffusion step'
-         return
-      end if
+      ! if (all(is_miscible)) then
+      !    if (debug_advection_diffusion_solver) write(*,*) 'init_advection_diffusion_state: all regions are miscible, skipping advection-diffusion step'
+      !    return
+      ! end if
 
-      call get_settling_velocity(s, adv_diff_state % v, is_miscible, Xi_miscible_min, ierr)
+      call get_settling_velocity(s, adv_diff_state % v, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       if (ierr /= 0) then
          write(*,*) 'init_advection_diffusion_state: error in get_settling_velocity'
          return
@@ -267,9 +361,9 @@ contains
          end do
       end if
 
-      deallocate(Xi_miscible_min)
-      deallocate(Xi_miscible_max)
-      deallocate(is_miscible)
+      if (allocated(Xi_miscible_min)) deallocate(Xi_miscible_min)
+      if (allocated(Xi_miscible_max)) deallocate(Xi_miscible_max)
+      if (allocated(is_miscible)) deallocate(is_miscible)
 
    end subroutine init_advection_diffusion_state
 
@@ -279,23 +373,35 @@ contains
       integer, intent(out) :: ierr
 
       ! local
-      real(kind=dp) :: tau_adv ! advection timescale
-      real(kind=dp) :: tau_diff ! diffusion timescale
       real(kind=dp) :: tau_adv_div_tau_diff  ! ratio of advection to diffusion timescale
       real(kind=dp) :: L, v, D
+      real(kind=dp) :: minimum_advection_diffusion_fraction = 5d0
       logical, allocatable :: mask(:)
       real(kind=dp) :: fraction_of_timescale
 
       ierr = 0 ! 0 means AOK
 
       fraction_of_timescale = s% element_sedimentation_advection_diffusion_time_step_factor
-      ! HHK: Check beta. To see some change at all, I had to set this value to 1d7 last time.
 
-      allocate(mask(adv_diff_state%nz))
-      mask = (adv_diff_state%v /= 0d0)
+      ! ? I am confilcted on what range to use for the time scale estimate
+      ! ? On the one hand, only a small fraction of the star is precipitating (v/=0d0)
+      ! ? On the other hand, we want to get the diffusion timescale of the entire region
+      allocate(mask(adv_diff_state%nz), source=.true.)  ! mask for precipitating regions
+      ! mask = (adv_diff_state% v /= 0d0)
+
+      ! if mask is all false, we have no precipitating regions
+      ! in this case, we set the mask to true to get the diffusion timescale of the entire region
+      ! if (all(.not. mask)) then
+      !    if (debug_advection_diffusion_solver) write(*,*) 'get_time_step: no precipitating regions found'
+      !    mask = .true.
+      ! end if
+
 
       L = sum(pack(adv_diff_state% dr, mask))
       v = dot_product(pack(adv_diff_state% v, mask), pack(adv_diff_state% dr, mask))/L
+
+      ! where (mask) adv_diff_state% D = max(adv_diff_state% D, minimum_advection_diffusion_fraction * v * L)
+
       D = dot_product(pack(adv_diff_state% D, mask), pack(adv_diff_state% dr, mask))/L
 
       if (D < 0d0) then
@@ -303,29 +409,52 @@ contains
          write(*,*) 'get_time_step: diffusion coefficient is zero or negative'
          return
       end if
-      if (v <= 0d0) then
+
+      if (v < 0d0) then
          ierr = 1
          write(*,*) 'get_time_step: settling velocity is zero or negative'
          return
       end if
+
+      if (v == 0d0 .and. D == 0d0) then
+         ierr = 1
+         write(*,*) 'get_time_step: both settling velocity and diffusion coefficient are zero'
+         return
+      end if
+
       if (L <= 0d0) then
          ierr = 1
          write(*,*) 'get_time_step: radial step size is zero or negative'
          return
       end if
 
-      tau_adv = L/v
-      tau_diff = L**2 / D
-      tau_adv_div_tau_diff = tau_adv/tau_diff
-      adv_diff_state% dt = min(tau_adv, tau_diff) * fraction_of_timescale
 
-      if (debug_advection_diffusion_solver) then
-         write(*,*) 'get_time_step: tau_adv = ', tau_adv
-         write(*,*) 'get_time_step: tau_diff = ', tau_diff
-         write(*,*) 'get_time_step: tau_adv_div_tau_diff = ', tau_adv_div_tau_diff
-         write(*,*) 'get_time_step: dt = ', adv_diff_state% dt
+
+      if (D == 0d0) then
+
+         adv_diff_state% tau_conv = -1d0
+         adv_diff_state% tau_settle = L/v
+
+         adv_diff_state% dt = adv_diff_state% tau_settle * fraction_of_timescale
+      else if (v == 0d0) then
+         adv_diff_state% tau_conv = L**2 / D
+         adv_diff_state% tau_settle = -1d0
+         adv_diff_state% dt = adv_diff_state% tau_conv * fraction_of_timescale
+      else
+         adv_diff_state% tau_conv = L**2 / D
+         adv_diff_state% tau_settle = L/v
+         adv_diff_state% dt = min(adv_diff_state% tau_conv, adv_diff_state% tau_settle) * fraction_of_timescale
       end if
 
+      if (debug_advection_diffusion_solver) then
+         tau_adv_div_tau_diff = adv_diff_state% tau_settle/adv_diff_state% tau_conv
+         write(*,*) ''
+         write(*,*) 'get_time_step: tau_adv = ', adv_diff_state% tau_settle
+         write(*,*) 'get_time_step: tau_diff = ', adv_diff_state% tau_conv
+         write(*,*) 'get_time_step: tau_adv_div_tau_diff = ', tau_adv_div_tau_diff
+         write(*,*) 'get_time_step: dt = ', adv_diff_state% dt
+         write(*,*) ''
+      end if
 
       deallocate(mask)
 
@@ -372,6 +501,7 @@ contains
       call setup_tridiagonal(adv_diff_state, a, b, c)  ! hhk
 
       f_n(1:nz-2) = adv_diff_state% Xi(2:nz-1)
+
       call tridag(a, b, c, f_n, f_np1)
 
       ! set change in element abundance
@@ -443,7 +573,7 @@ contains
          call check_after_rain(s, 1, s% nz, xa_pre, ierr)
 
          ! adjust model after mixing
-         call update_model_(s, k_update, s% nz, .true.)
+         call update_model_(s, 1, s% nz, .true.)
 
          deallocate(dXi, is_miscible)
 
@@ -2014,23 +2144,24 @@ contains
 
       s% xa(i_Xi, 1:s% nz) = s% xa(i_Xi, 1:s% nz) + dXi(1:s% nz)
 
-      ! For the advection-diffusion method, we can sometimes jump beyond the ranges. We thus have to renormalize.
-      if (sedimentation_method == advection_diffusion_rain) then
-         do k = 1, s%nz
-            ! map s % xa(:,k) to the range [0, 1]
-            xa_min = minval(s%xa(:,k))
-            xa_max = maxval(s%xa(:,k))
+      ! For the advection-diffusion method, we can sometimes jump beyond the ranges. 
+      ! The code below renormalizes, but it does not conserve X, Y, and Z.
+      ! if (sedimentation_method == advection_diffusion_rain) then
+      !    do k = 1, s%nz
+      !       ! map s % xa(:,k) to the range [0, 1]
+      !       xa_min = minval(s%xa(:,k))
+      !       xa_max = maxval(s%xa(:,k))
 
-            if (xa_min >= 0d0 .and. xa_max <= 1d0) cycle  ! already in the range [0, 1]
-            
-            if (xa_min < 0d0) s% xa(:,k) = (s%xa(:,k) - xa_min) / (xa_max - xa_min)
-            
-            xa_sum = sum(s%xa(:,k))
+      !       if (xa_min >= 0d0 .and. xa_max <= 1d0) cycle  ! already in the range [0, 1]
 
-            ! normalize
-            s % xa(:,k) = s % xa(:,k) / xa_sum
-         end do
-      end if
+      !       if (xa_min < 0d0) s% xa(:,k) = (s%xa(:,k) - xa_min) / (xa_max - xa_min)
+
+      !       xa_sum = sum(s%xa(:,k))
+
+      !       ! normalize
+      !       s % xa(:,k) = s % xa(:,k) / xa_sum
+      !    end do
+      ! end if
 
       ! HHK: test that again we conserved mass
 
@@ -2170,11 +2301,11 @@ contains
 
    end subroutine from_scaled_number_fraction_to_mass_fraction
 
-   subroutine get_settling_velocity(s, v_settle, is_miscible, Xi_miscible, ierr)
+   subroutine get_settling_velocity(s, v_settle, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       type (star_info), pointer :: s
       real(kind=dp), allocatable, intent(out) :: v_settle(:)
       logical, allocatable, intent(in) :: is_miscible(:)
-      real(kind=dp), allocatable, intent(in) :: Xi_miscible(:)
+      real(kind=dp), allocatable, intent(in) :: Xi_miscible_min(:), Xi_miscible_max(:)
       integer, intent(out) :: ierr
 
       ! local variables
@@ -2268,10 +2399,12 @@ contains
       ! c(1) is the second index of 1, 2, …, N-1, N, i.e., 2
 
       do i = 1, nz-2
+
          ! we need to add one to i because a, b, and c, range from 2 to N-1 instead of 1 to N
          a(i) = -alpha_half_step_down(adv_diff_state, i+1)
          c(i) = -alpha_half_step_up(adv_diff_state, i+1) + beta_half_step_up(adv_diff_state, i+1)
          b(i) = 1d0 + alpha_half_step_down(adv_diff_state, i+1) + alpha_half_step_up(adv_diff_state, i+1) - beta_half_step_down(adv_diff_state, i+1)
+
       end do
 
       ! Set the boundary conditions
@@ -2349,11 +2482,14 @@ contains
       integer, intent(in) :: j
 
       real(kind=dp) :: dxCell, dt, v
+
+
       dxCell = (adv_diff_state% dr(j+1) + adv_diff_state% dr(j)) / 2.0d0
       dt = adv_diff_state% dt
       v = (adv_diff_state% v(j) + adv_diff_state% v(j+1)) / 2.0d0
       ! Calculate the stability parameter
       beta_half_step_up = beta(dxCell, dt, v)
+
 
    end function beta_half_step_up
 
@@ -2610,6 +2746,16 @@ contains
       return
 
    end subroutine update_model_
+
+   real(dp) function heterogeneity(dXi, dm)
+      real(dp), intent(in) :: dXi(:), dm(:)
+      real(dp) :: h2, M
+
+      M = sum(dm)
+      h2 = dot_product(dm, pow2(dXi)) / M
+      heterogeneity = sqrt(h2)
+
+   end function heterogeneity
 
 
 end module element_sedimentation
