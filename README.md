@@ -179,3 +179,8 @@ call immiscible_helium_fraction_interpolation(P0, T0, pd, Y_min, Y_max, ierr)
 
 - The function assumes that the phase diagram is loaded and consistent.
 - Errors are indicated via the `ierr` return value.
+
+## TODO
+
+- [ ] Make `beta_crit` a user input.
+- [ ] Make `f_crit` a user input.
