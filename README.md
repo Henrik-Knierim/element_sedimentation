@@ -184,3 +184,4 @@ call immiscible_helium_fraction_interpolation(P0, T0, pd, Y_min, Y_max, ierr)
 
 - [ ] Make `beta_crit` a user input.
 - [ ] Make `f_crit` a user input.
+- [ ] Be uniform if you check for `allocated(is_miscible)` or for `all(is_miscible)` in the code.

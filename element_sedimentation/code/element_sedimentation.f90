@@ -24,7 +24,11 @@ module element_sedimentation
    real(dp), parameter :: very_small = 1d-6
    real(dp), parameter :: small = 1d-4
 
-   real(dp), parameter :: temperature_shift = 0d0
+   real(dp) :: alpha_max = 0d0  ! debugging for alpha
+   real(dp) :: beta_max = 0d0  ! debugging for beta
+
+   real(dp), parameter :: alpha_div_beta_crit = 1d1   ! the solver becomes unstable if the ratio of alpha to beta is smaller than this value
+
    character(len=32), parameter :: phase_diagram_elements(2) = [character(len=32) :: 'h1', 'he4']
 
    real(kind=dp), parameter :: minimal_pressure_scale_height = 1d0   ! the minimal size below which we join precipitating regions.
@@ -36,6 +40,7 @@ module element_sedimentation
    logical :: debug_phase_diagram = .false.
    logical :: debug_set_dXi = .false.
    logical :: debug_bottom_up_rain = .false.
+   logical :: debug_backward_Euler = .false.
    logical :: verbose = .true.
    logical :: first_call
    logical :: custom_debug = .false. ! for dirty debugging
@@ -187,8 +192,13 @@ contains
       if (verbose) write(*,*) 'do_advection_diffusion_rain: max_iterations = ', max_iterations
       if (verbose) call print_advection_diffusion_state(adv_diff_state)
 
+      alpha_max = 0d0
+      beta_max = 0d0
       do i = 1, max_iterations
-         if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: iteration: ', i
+
+         if (verbose .and. mod(i, 100) == 0) then
+            write(*,*) 'do_advection_diffusion_rain: iteration ', i
+         end if
 
          ! initialize the advection-diffusion state
          call init_advection_diffusion_state(s, adv_diff_state, ierr)
@@ -205,7 +215,7 @@ contains
          ! perform the advection-diffusion step
          call backward_Euler_step(adv_diff_state, ierr)
          if (ierr /= 0) return
-
+         
          if (debug_advection_diffusion_solver) then
             do j = 1, adv_diff_state%nz
                write(*,*) 'do_advection_diffusion_rain: (k, Xi(k), dXi(k)) = ', j, adv_diff_state% Xi(j), adv_diff_state% dXi(j)
@@ -229,6 +239,10 @@ contains
          ! call update_model_(s, 1, s% nz, .false.)
       end do
 
+      write(*,*) 'alpha_max = ', alpha_max
+      write(*,*) 'beta_max = ', beta_max
+      write(*,*) 'alpha_max/beta_max = ', alpha_max / beta_max
+
       ! TODO: Adjust the mixing in the sedimenting region
       ! stop
       ! call adjust_mixing_in_sedimenting_region(s, precipitating_regions, ierr)
@@ -245,7 +259,7 @@ contains
       integer :: k
       real(kind=dp) :: scaling_factor, max_scaling_factor, min_scaling_factor
       real(kind=dp) :: new_Xi
-      real(kind=dp) :: fudge_factor = 1d-6  ! fudge factor to avoid division by zero
+      real(kind=dp) :: fudge_factor = 1d-3  ! fudge factor to avoid division by zero
 
       ierr = 0 ! 0 means AOK
 
@@ -276,7 +290,7 @@ contains
       scaling_factor = min(max_scaling_factor, min_scaling_factor)
 
       if (scaling_factor < 1d0) then
-         if (verbose) then
+         if (debug_advection_diffusion_solver) then
             write(*,*) 'limit_dXi_to_physical_range: applying scaling factor = ', scaling_factor
             write(*,*) achar(9), 'max_scaling_factor: ', max_scaling_factor
             write(*,*) achar(9), 'min_scaling_factor: ', min_scaling_factor
@@ -299,8 +313,9 @@ contains
       write(*,'(A,E12.5)') ' tau_settle: ', adv_diff_state%tau_settle
       write(*,'(A,E12.5)') ' tau_conv: ', adv_diff_state%tau_conv
       write(*,'(A,E12.5)') ' tau_settle/tau_conv: ', adv_diff_state%tau_settle/adv_diff_state%tau_conv
+      write(*,'(A,E12.5)') 'tau_settle/dt: ', adv_diff_state%tau_settle/adv_diff_state%dt
+      write(*,'(A,E12.5)') 'tau_conv/dt: ', adv_diff_state%tau_conv/adv_diff_state%dt
       write(*,'(A,E12.5)') 'mean diffusion coefficient: ', dot_product(adv_diff_state%D, adv_diff_state%dr)/sum(adv_diff_state%dr)
-
 
 
       ! if (allocated(adv_diff_state%D)) then
@@ -352,6 +367,36 @@ contains
 
    end subroutine print_advection_diffusion_state
 
+   subroutine print_precipitating_cells(s, is_miscible, ierr, Xi_miscible_min, Xi_miscible_max)
+      type (star_info), pointer :: s
+      logical, intent(in) :: is_miscible(:)  ! miscible regions
+      integer, intent(out) :: ierr
+      real(kind=dp), intent(in), optional :: Xi_miscible_min(:), Xi_miscible_max(:)  ! miscible element mass fraction
+
+      integer :: k
+      ierr = 0 ! 0 means AOK
+
+      write(*,*) '=== Precipitating Cells ==='
+      if (present(Xi_miscible_min) .and. present(Xi_miscible_max)) then
+         write(*,*) ' k', ' is_miscible', ' Xi_miscible_min', ' Xi_miscible_max', ' Xi'
+         do k = 1, s% nz
+            if (is_miscible(k)) cycle
+            write(*,'(I4, 1X, L1, 1X, E12.5, 1X, E12.5, 1X, E12.5)') &
+               k, is_miscible(k), Xi_miscible_min(k), Xi_miscible_max(k), s% xa(i_Xi, k)
+         end do
+      else
+         write(*,*) ' k', ' is_miscible', ' Xi'
+         do k = 1, s% nz
+            if (is_miscible(k)) cycle
+            write(*,'(I4, 1X, L1, 1X, E12.5)') &
+               k, is_miscible(k), s% xa(i_Xi, k)
+         end do
+      end if
+
+      write(*,*) '================================='
+
+   end subroutine print_precipitating_cells
+
    subroutine init_advection_diffusion_state(s, adv_diff_state, ierr)
       type (star_info), pointer :: s
       type(advection_diffusion_state), intent(out) :: adv_diff_state
@@ -362,6 +407,7 @@ contains
       logical, allocatable :: is_miscible(:)  ! miscible regions
       real(kind=dp), allocatable :: v_settle(:)  ! settling velocity
       integer :: k
+      integer :: k_buffer = 5 ! buffer to avoid edge effects
 
       ierr = 0 ! 0 means AOK
 
@@ -379,30 +425,41 @@ contains
       end do
       !$OMP END PARALLEL DO
 
-      call get_raw_miscibility(s, 1, s% nz, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
-      if (ierr /= 0) then
-         write(*,*) 'init_advection_diffusion_state: error in get_raw_miscibility'
-         return
-      end if
+      ! call get_raw_miscibility(s, 1, s% nz, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
+      ! if (ierr /= 0) then
+      !    write(*,*) 'init_advection_diffusion_state: error in get_raw_miscibility'
+      !    return
+      ! end if
 
       ! call close_miscibility_gap(s, 1, s% nz, is_miscible, ierr)
       ! if (ierr /= 0) then
       !    write(*,*) 'init_advection_diffusion_state: error in close_miscibility_gap'
       !    return
       ! end if
-      
-      is_miscible (s%nz-5 : s%nz) = .true.  ! last five zones are always miscible for boundary condition reasons
-      
-      ! dummy miscibility array
-      ! allocate(is_miscible(1:s% nz), source=.true.)  ! all regions are miscible by default
-      ! where (s% xa(i_Xi, 500:530) > 0.2d0 .and. s% xa(i_Xi, 500:530) < 0.9d0) is_miscible(500:530) = .false.
-      ! where (s% xa(i_Xi, s% nz-75:s% nz-50) > 0.2d0) is_miscible(s% nz-75:s% nz-50) = .false.
 
+
+
+      ! is_miscible (s%nz-k_buffer : s%nz) = .true.  ! assume the last k_buffer cells are miscible
+
+
+
+      ! ! dummy miscibility array
+      ! ! allocate(is_miscible(1:s% nz), source=.true.)  ! all regions are miscible by default
+      ! ! where (s% xa(i_Xi, 500:530) > 0.2d0 .and. s% xa(i_Xi, 500:530) < 0.9d0) is_miscible(500:530) = .false.
+      allocate(is_miscible(1:s% nz), source=.true.)
+      where (s% xa(i_Xi, s% nz-60:s% nz-50) > 0.2d0) is_miscible(s% nz-60:s% nz-50) = .false.
+
+      ! call get_miscibility_for_advection_diffusion_state(s, adv_diff_state, is_miscible, ierr)
+      ! if (ierr /= 0) return
 
       if (.not. precipitated .and. all(is_miscible)) then
          if (debug_advection_diffusion_solver) write(*,*) 'init_advection_diffusion_state: all regions are miscible, skipping advection-diffusion step'
          return
       end if
+
+
+      if (first_call) call print_precipitating_cells(s, is_miscible, ierr)
+      if (ierr /= 0) return
 
       call get_settling_velocity(s, adv_diff_state % v, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       if (ierr /= 0) then
@@ -410,7 +467,7 @@ contains
          return
       end if
 
-      call get_time_step(s, adv_diff_state, ierr)
+      call get_timescales(s, adv_diff_state, ierr)
       if (ierr /= 0) then
          write(*,*) 'init_advection_diffusion_state: error in get_time_step'
          return
@@ -431,7 +488,43 @@ contains
 
    end subroutine init_advection_diffusion_state
 
-   subroutine get_time_step(s, adv_diff_state, ierr)
+   subroutine get_miscibility_for_advection_diffusion_state(s, adv_diff_state, is_miscible, ierr)
+      type (star_info), pointer :: s
+      type(advection_diffusion_state), intent(in) :: adv_diff_state
+      logical, intent(out), allocatable :: is_miscible(:)  ! miscible regions
+      integer, intent(out) :: ierr
+
+      real(dp), allocatable :: dXi_local(:)  ! change in the element's mass fraction from get_dXi
+
+      integer :: k_buffer = 150
+
+      ierr = 0 ! 0 means AOK
+
+      call get_dXi(s, 1, s% nz, dXi_local, is_miscible, ierr)
+
+      if (ierr /= 0) then
+         write(*,*) 'get_miscibility_for_advection_diffusion_state: error in get_dXi'
+         return
+      end if
+
+      if (.not. allocated(is_miscible)) then
+         allocate(is_miscible(1:s% nz), source=.true.)  ! all regions are miscible by default
+         return
+      end if
+
+      ! first, set is_miscible to .true. for all regions above the current Xi value
+      ! where (adv_diff_state% Xi(1:s% nz) + dXi_local(1:s % nz) >= adv_diff_state% Xi(1:s% nz)) is_miscible(1:s%nz) = .true.
+      is_miscible(1:s%nz) = .true.
+
+
+      ! then, set is_miscible to .false. for all regions below the current Xi value
+      where (adv_diff_state% Xi(s% nz - k_buffer:s% nz) + dXi_local(s% nz - k_buffer:s % nz) < adv_diff_state% Xi(s% nz - k_buffer:s% nz)) is_miscible(s% nz - k_buffer:s% nz) = .false.
+
+
+
+   end subroutine get_miscibility_for_advection_diffusion_state
+
+   subroutine get_timescales(s, adv_diff_state, ierr)
       type (star_info), pointer :: s
       type(advection_diffusion_state), intent(inout) :: adv_diff_state
       integer, intent(out) :: ierr
@@ -439,33 +532,17 @@ contains
       ! local
       real(kind=dp) :: tau_adv_div_tau_diff  ! ratio of advection to diffusion timescale
       real(kind=dp) :: L, v, D
-      real(kind=dp) :: minimum_advection_diffusion_fraction = 1d0
-      logical, allocatable :: mask(:)
       real(kind=dp) :: fraction_of_timescale
 
       ierr = 0 ! 0 means AOK
 
       fraction_of_timescale = s% element_sedimentation_advection_diffusion_time_step_factor
+      adv_diff_state% dt = secyer * fraction_of_timescale
 
-      ! ? I am confilcted on what range to use for the time scale estimate
-      ! ? On the one hand, only a small fraction of the star is precipitating (v/=0d0)
-      ! ? On the other hand, we want to get the diffusion timescale of the entire region
-      allocate(mask(adv_diff_state%nz), source=.true.)  ! mask for precipitating regions
-      ! mask = (adv_diff_state% v /= 0d0)
-
-      ! if mask is all false, we have no precipitating regions
-      ! in this case, we set the mask to true to get the diffusion timescale of the entire region
-      ! if (all(.not. mask)) then
-      !    if (debug_advection_diffusion_solver) write(*,*) 'get_time_step: no precipitating regions found'
-      !    mask = .true.
-      ! end if
-
-
-      L = sum(pack(adv_diff_state% dr, mask))
-      v = dot_product(pack(adv_diff_state% v, mask), pack(adv_diff_state% dr, mask))/L
-      where (adv_diff_state% v /= 0d0) adv_diff_state% D = max(adv_diff_state% D, minimum_advection_diffusion_fraction * v * L)
-
-      D = dot_product(pack(adv_diff_state% D, mask), pack(adv_diff_state% dr, mask))/L
+      call ensure_alpha_div_beta_crit(s,  adv_diff_state, ierr)
+      L = sum(adv_diff_state% dr)
+      v = dot_product(adv_diff_state% v, adv_diff_state% dr)/L
+      D = dot_product(adv_diff_state% D,adv_diff_state% dr)/L
 
       if (D < 0d0) then
          ierr = 1
@@ -491,29 +568,8 @@ contains
          return
       end if
 
-
-
-      if (D == 0d0) then
-
-         adv_diff_state% tau_conv = -1d0
-         adv_diff_state% tau_settle = L/v
-
-         adv_diff_state% dt = adv_diff_state% tau_settle * fraction_of_timescale
-      else if (v == 0d0) then
-         adv_diff_state% tau_conv = L**2 / D
-         adv_diff_state% tau_settle = -1d0
-         adv_diff_state% dt = adv_diff_state% tau_conv * fraction_of_timescale
-      else
-         adv_diff_state% tau_conv = L**2 / D
-         adv_diff_state% tau_settle = L/v
-         adv_diff_state% dt = min(adv_diff_state% tau_conv, adv_diff_state% tau_settle) * fraction_of_timescale
-      end if
-
-      call limit_time_step(s, adv_diff_state, ierr)
-      if (ierr /= 0) then
-         write(*,*) 'get_time_step: error in get_time_step_from_beta'
-         return
-      end if
+      adv_diff_state% tau_conv = tau_diff(L, D)  ! diffusion timescale
+      adv_diff_state% tau_settle = tau_adv(L, v)  ! advection timescale
 
       if (debug_advection_diffusion_solver) then
          tau_adv_div_tau_diff = adv_diff_state% tau_settle/adv_diff_state% tau_conv
@@ -525,32 +581,59 @@ contains
          write(*,*) ''
       end if
 
-      deallocate(mask)
 
-   end subroutine get_time_step
+   end subroutine get_timescales
 
-   subroutine limit_time_step(s, adv_diff_state, ierr)
+   real(kind=dp) function tau_adv(L, v)
+      real(kind=dp), intent(in) :: L  ! length scale
+      real(kind=dp), intent(in) :: v  ! velocity
+
+      ! Calculate the advection timescale
+      if (v == 0d0) then
+         tau_adv = huge(1d0)  ! no advection, return a large value
+      else
+         tau_adv = L / v
+      end if
+
+   end function tau_adv
+
+   real(kind=dp) function tau_diff(L, D)
+      real(kind=dp), intent(in) :: L  ! length scale
+      real(kind=dp), intent(in) :: D  ! diffusion coefficient
+
+      ! Calculate the diffusion timescale
+      if (D == 0d0) then
+         tau_diff = huge(1d0)  ! no diffusion, return a large value
+      else
+         tau_diff = L**2 / D
+      end if
+
+   end function tau_diff
+
+   subroutine ensure_alpha_div_beta_crit(s,  adv_diff_state, ierr)
+      ! makes sure that the ratio of alpha to beta is above a critical value by setting a minimum diffusion coefficient
       type (star_info), pointer :: s
       type(advection_diffusion_state), intent(inout) :: adv_diff_state
       integer, intent(out) :: ierr
 
-      ! local
-      real(kind=dp) :: beta_crit  ! beta parameter for the advection-diffusion solver
-      real(kind=dp) :: dt
+      ! local variables
+      integer :: k
+      real(kind=dp) :: alpha_val, beta_val
 
       ierr = 0 ! 0 means AOK
 
-      beta_crit = 0.75d0 ! the beta value we'd like to have
-      dt = beta_crit * minval(pack(adv_diff_state% dr, adv_diff_state% v /= 0d0)) / maxval(pack(adv_diff_state% v, adv_diff_state% v /= 0d0))
+      adv_diff_state % D = max(adv_diff_state % D, alpha_div_beta_crit * adv_diff_state % v * adv_diff_state % dr)
 
-      if (verbose .and. first_call) then
-         write(*,*) 'limit_time_step: dt_beta/dt = ', dt/adv_diff_state% dt
-      end if
-      adv_diff_state% dt = min(adv_diff_state% dt, dt)
+      ! if (verbose .and. first_call) then
+      !    write(*,*) 'ensure_alpha_div_beta_crit: k, D, v, alpha, beta, alpha / beta'
+      !    do k = 1, adv_diff_state % nz
+      !       alpha_val = alpha(adv_diff_state % dr(k), adv_diff_state % dr(k), adv_diff_state % dt, adv_diff_state % D(k))
+      !       beta_val = beta(adv_diff_state % dr(k), adv_diff_state % dt, adv_diff_state % v(k))
+      !       write(*,'(i5, 99(1pd26.16))') k, adv_diff_state % D(k), adv_diff_state % v(k), alpha_val, beta_val, alpha_val / beta_val
+      !    end do
+      ! end if
 
-
-
-   end subroutine limit_time_step
+   end subroutine ensure_alpha_div_beta_crit
 
    subroutine free_advection_diffusion_state(adv_diff_state)
       type(advection_diffusion_state), intent(inout) :: adv_diff_state
@@ -578,30 +661,36 @@ contains
       integer, intent(out) :: ierr
 
       ! local variables
-      integer :: i, nz, k
+      integer :: i, nz, n, k
       real(kind=dp), allocatable :: a(:), b(:), c(:), f_n(:), f_np1(:)
 
       ierr = 0 ! 0 means AOK
       nz = adv_diff_state % nz
+      n = nz - 2  ! number of interior points (excluding boundaries)
 
       ! use tridiagonal matrix solver in the range [2, N-1]
       ! the other values are set by boundary conditions
-      allocate(a(nz-2), b(nz-2), c(nz-2), f_n(nz-2), f_np1(nz-2))
+      allocate(a(n), b(n), c(n), f_n(n), f_np1(n))
 
       ! Set tridiagonal matrix coefficients
       ! a(1) and c(-1) are not used
       call setup_tridiagonal(adv_diff_state, a, b, c)  ! hhk
 
       f_n(1:nz-2) = adv_diff_state% Xi(2:nz-1)
+      f_np1 = f_n
 
-      call tridag(a, b, c, f_n, f_np1)
+      ! solve the tridiagonal system
+      call DGTSV(n, 1, a(2:n), b, c(1:n-1), f_np1, n, ierr)
+      if (ierr /= 0) then
+         write(*,*) "backward_Euler_step: LAPACK DGTSV failed with ierr = ", ierr
+      end if
 
       ! set change in element abundance
       adv_diff_state% dXi(1) = f_np1(1) - f_n(1) ! Neumann BC at r=0
       adv_diff_state% dXi(2:nz-1) = f_np1(1:nz-2) - f_n(1:nz-2) ! interior points
       adv_diff_state% dXi(nz) = f_np1(nz-2) - f_n(nz-2) ! Neumann BC at r=L
 
-      if ( debug_advection_diffusion_solver ) then
+      if ( debug_backward_Euler ) then
          write(*,'(a16,a16,a16,a16)') 'k','f_n(k)', 'f_np1(k)', 'dXi(k)'
          do k = 1, nz-2
             write(*,'(i12,99(1pd26.16))') k+1, f_n(k), f_np1(k), adv_diff_state% dXi(k+1)
@@ -876,6 +965,7 @@ contains
       integer, intent(out) :: ierr
 
       ! local
+      integer :: n_immiscible_threshold = 5  ! if the number of immiscible zones is less than this, we don't need to do anything
       integer :: k, i, op_err
       real(kind=dp), allocatable :: Xi_miscible_min(:), Xi_miscible_max(:)
       integer :: k_debug ! utils
@@ -886,8 +976,9 @@ contains
          return
       end if
 
+
       ! if is_miscible is .true. everywhere, we don't need to do anything
-      if (all(is_miscible)) then
+      if (count(.not. is_miscible) < n_immiscible_threshold) then
          deallocate(Xi_miscible_min, Xi_miscible_max, is_miscible)
          return
       end if
@@ -2457,7 +2548,6 @@ contains
       ierr = 0 ! 0 means AOK
 
       allocate(v_settle(s% nz), source=0d0)
-
       v_settle_0 = s% element_sedimentation_velocity
       v_settle(1:s% nz) = merge(0d0, v_settle_0, is_miscible(1:s% nz))
 
@@ -2606,6 +2696,8 @@ contains
       ! Calculate the stability parameter
       alpha = D * dt / (dxCell * dxSurf)
 
+      alpha_max = max(alpha_max, alpha)  ! keep track of the maximum alpha value for debugging
+
    end function alpha
 
    real(kind=dp) function beta_half_step_down(adv_diff_state, j)
@@ -2640,15 +2732,10 @@ contains
    real(kind=dp) function beta(dxCell, dt, v)
       real(kind=dp), intent(in) :: dxCell, dt, v
 
-      ! Calculate the beta parameter
+      ! Calculate the beta parameter (always use absolute value for stability check)
       beta = dt * v / dxCell
 
-      ! throw an error if beta is greater than 1
-      if (abs(beta) > 1.0d0) then
-         write(*,*) "Error: beta is greater than 1.0, beta = ", beta
-         stop
-      end if
-
+      beta_max = max(beta_max, beta)  ! keep track of the maximum beta value for debugging
 
    end function beta
 
