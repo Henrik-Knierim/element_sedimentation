@@ -24,10 +24,10 @@ module element_sedimentation
    real(dp), parameter :: very_small = 1d-6
    real(dp), parameter :: small = 1d-4
 
-   real(dp) :: alpha_max = 0d0  ! debugging for alpha
+   real(dp) :: alpha_min = huge(1d0)  ! debugging for alpha
    real(dp) :: beta_max = 0d0  ! debugging for beta
 
-   real(dp), parameter :: alpha_div_beta_crit = 1d1   ! the solver becomes unstable if the ratio of alpha to beta is smaller than this value
+   real(dp), parameter :: alpha_div_beta_crit = 4.5d1   ! the solver becomes unstable if the ratio of alpha to beta is smaller than this value (3d1, 5d1)
 
    character(len=32), parameter :: phase_diagram_elements(2) = [character(len=32) :: 'h1', 'he4']
 
@@ -161,6 +161,35 @@ contains
 
    end subroutine do_element_sedimentation
 
+   integer function solver_iterations_from_timescales(adv_diff_state, ierr)
+      type(advection_diffusion_state), intent(in) :: adv_diff_state
+      integer :: max_iterations = 100000
+      integer, intent(out) :: ierr
+      real(kind=dp) :: longest_timescale
+
+      ierr = 0 ! 0 means AOK
+      if ( adv_diff_state% tau_conv == huge(1d0) ) then
+         longest_timescale = adv_diff_state% tau_settle
+      else if ( adv_diff_state% tau_settle == huge(1d0) ) then
+         ! HKK: Hack to avoid core diffusion
+         solver_iterations_from_timescales = -1
+         return
+         ! longest_timescale = adv_diff_state% tau_conv
+      else
+         longest_timescale = max(adv_diff_state% tau_conv, adv_diff_state% tau_settle)
+      end if
+      
+      if (longest_timescale <= 0d0) then
+         write(*,*) 'solver_iterations_from_timescales: longest_timescale is non-positive, returning 1'
+         ierr = 1
+         return
+      end if
+
+      solver_iterations_from_timescales = min(nint(longest_timescale / adv_diff_state% dt), max_iterations)
+
+
+      
+   end function solver_iterations_from_timescales
    subroutine do_advection_diffusion_rain(s, ierr)
       type (star_info), pointer :: s
       integer, intent(out) :: ierr
@@ -170,6 +199,8 @@ contains
       integer :: i, j
       real(kind=dp) :: h  ! heterogeneity
       type(advection_diffusion_state) :: adv_diff_state
+      real(kind=dp) :: dXi_max_crit = 0.01
+      real(kind=dp) :: dXi_max
 
       ierr = 0 ! 0 means AOK
 
@@ -187,12 +218,19 @@ contains
          precipitated = .true.
       end if
 
-      max_iterations = min(nint(max(adv_diff_state% tau_conv, adv_diff_state% tau_settle) / adv_diff_state% dt), 10000)
+      max_iterations = solver_iterations_from_timescales(adv_diff_state, ierr)
+      if (ierr /= 0) return
+
+      if (max_iterations < 0) then
+         if (verbose) write(*,*) 'do_advection_diffusion_rain: skipping advection-diffusion step due to negative max_iterations'
+         call free_advection_diffusion_state(adv_diff_state)
+         return
+      end if
 
       if (verbose) write(*,*) 'do_advection_diffusion_rain: max_iterations = ', max_iterations
       if (verbose) call print_advection_diffusion_state(adv_diff_state)
 
-      alpha_max = 0d0
+      alpha_min = huge(0d0)
       beta_max = 0d0
       do i = 1, max_iterations
 
@@ -215,7 +253,7 @@ contains
          ! perform the advection-diffusion step
          call backward_Euler_step(adv_diff_state, ierr)
          if (ierr /= 0) return
-         
+
          if (debug_advection_diffusion_solver) then
             do j = 1, adv_diff_state%nz
                write(*,*) 'do_advection_diffusion_rain: (k, Xi(k), dXi(k)) = ', j, adv_diff_state% Xi(j), adv_diff_state% dXi(j)
@@ -228,10 +266,13 @@ contains
          call adjust_mass_fractions(s, adv_diff_state% dXi, ierr)
 
          ! check if the change in the element's mass fraction is below a threshold
-         h = heterogeneity(adv_diff_state% dXi, s% dm(1:s% nz))
-         if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: h, max(|dXi|) = ', h, maxval(abs(adv_diff_state% dXi))
-         ! if (h < 1d-8) then ! 2-5d-8
-         !    if (verbose) write(*,*) 'do_advection_diffusion_rain: no significant change in element mass fraction'
+         ! h = heterogeneity(adv_diff_state% dXi, s% dm(1:s% nz))
+         ! if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: h, max(|dXi|) = ', h, maxval(abs(adv_diff_state% dXi))
+         
+         ! dXi_max = maxval(s% xa(i_Xi, 1:s% nz) - s% xa_old(i_Xi, 1:s% nz))
+         ! if (dXi_max >= dXi_max_crit) then ! 2-5d-8
+         !    if (verbose) write(*,*) 'do_advection_diffusion_rain: mass fraction changed beyond threshold: ', &
+         !        'i = ', i, 'max(|dXi|) = ', dXi_max, ' >= dXi_max_crit = ', dXi_max_crit
          !    exit
          ! end if
 
@@ -239,9 +280,9 @@ contains
          ! call update_model_(s, 1, s% nz, .false.)
       end do
 
-      write(*,*) 'alpha_max = ', alpha_max
+      write(*,*) 'alpha_min = ', alpha_min
       write(*,*) 'beta_max = ', beta_max
-      write(*,*) 'alpha_max/beta_max = ', alpha_max / beta_max
+      write(*,*) 'alpha_min/beta_max = ', alpha_min / beta_max
 
       ! TODO: Adjust the mixing in the sedimenting region
       ! stop
@@ -407,7 +448,6 @@ contains
       logical, allocatable :: is_miscible(:)  ! miscible regions
       real(kind=dp), allocatable :: v_settle(:)  ! settling velocity
       integer :: k
-      integer :: k_buffer = 5 ! buffer to avoid edge effects
 
       ierr = 0 ! 0 means AOK
 
@@ -438,19 +478,15 @@ contains
       ! end if
 
 
-
-      ! is_miscible (s%nz-k_buffer : s%nz) = .true.  ! assume the last k_buffer cells are miscible
-
-
-
       ! ! dummy miscibility array
       ! ! allocate(is_miscible(1:s% nz), source=.true.)  ! all regions are miscible by default
       ! ! where (s% xa(i_Xi, 500:530) > 0.2d0 .and. s% xa(i_Xi, 500:530) < 0.9d0) is_miscible(500:530) = .false.
-      allocate(is_miscible(1:s% nz), source=.true.)
-      where (s% xa(i_Xi, s% nz-60:s% nz-50) > 0.2d0) is_miscible(s% nz-60:s% nz-50) = .false.
 
-      ! call get_miscibility_for_advection_diffusion_state(s, adv_diff_state, is_miscible, ierr)
-      ! if (ierr /= 0) return
+      ! allocate(is_miscible(1:s% nz), source=.true.)
+      ! where (s% xa(i_Xi, s% nz-60:s% nz-50) > 0.2d0) is_miscible(s% nz-60:s% nz-50) = .false.
+
+      call get_miscibility_for_advection_diffusion_state(s, adv_diff_state, is_miscible, ierr)
+      if (ierr /= 0) return
 
       if (.not. precipitated .and. all(is_miscible)) then
          if (debug_advection_diffusion_solver) write(*,*) 'init_advection_diffusion_state: all regions are miscible, skipping advection-diffusion step'
@@ -492,15 +528,17 @@ contains
       type (star_info), pointer :: s
       type(advection_diffusion_state), intent(in) :: adv_diff_state
       logical, intent(out), allocatable :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable :: Xi_miscible_min(:), Xi_miscible_max(:)  ! miscible element mass fraction
       integer, intent(out) :: ierr
 
       real(dp), allocatable :: dXi_local(:)  ! change in the element's mass fraction from get_dXi
 
-      integer :: k_buffer = 150
+      integer :: k_buffer = 25
+      integer :: k_core, k
 
       ierr = 0 ! 0 means AOK
 
-      call get_dXi(s, 1, s% nz, dXi_local, is_miscible, ierr)
+      call get_dXi(s, 1, s% nz, dXi_local, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
 
       if (ierr /= 0) then
          write(*,*) 'get_miscibility_for_advection_diffusion_state: error in get_dXi'
@@ -512,13 +550,28 @@ contains
          return
       end if
 
+      do k = s% nz, 1, -1
+         if (adv_diff_state% Xi(k) + dXi_local(k) < adv_diff_state% Xi(k) ) then
+            k_core = k+1
+            exit
+         end if
+      end do
+
+
+      ! do k = 1, k_core -1
+      !    is_miscible(k) = .not. is_at_miscibility_edge(adv_diff_state% Xi(k), is_miscible(k), Xi_miscible_min(k), Xi_miscible_max(k))
+      ! end do
+
+      is_miscible(k_core:s% nz) = .true.  ! all regions above the current Xi value are miscible
+      is_miscible(max(1,k_core-k_buffer):k_core-1) = .false.  ! add a buffer to stabalize the core
+
       ! first, set is_miscible to .true. for all regions above the current Xi value
       ! where (adv_diff_state% Xi(1:s% nz) + dXi_local(1:s % nz) >= adv_diff_state% Xi(1:s% nz)) is_miscible(1:s%nz) = .true.
-      is_miscible(1:s%nz) = .true.
+      ! is_miscible(1:s%nz) = .true.
 
 
       ! then, set is_miscible to .false. for all regions below the current Xi value
-      where (adv_diff_state% Xi(s% nz - k_buffer:s% nz) + dXi_local(s% nz - k_buffer:s % nz) < adv_diff_state% Xi(s% nz - k_buffer:s% nz)) is_miscible(s% nz - k_buffer:s% nz) = .false.
+      ! where (adv_diff_state% Xi(s% nz - k_buffer:s% nz) + dXi_local(s% nz - k_buffer:s % nz) < adv_diff_state% Xi(s% nz - k_buffer:s% nz)) is_miscible(s% nz - k_buffer:s% nz) = .false.
 
 
 
@@ -686,9 +739,12 @@ contains
       end if
 
       ! set change in element abundance
-      adv_diff_state% dXi(1) = f_np1(1) - f_n(1) ! Neumann BC at r=0
+      ! Interior points (solved by tridiagonal system)
       adv_diff_state% dXi(2:nz-1) = f_np1(1:nz-2) - f_n(1:nz-2) ! interior points
-      adv_diff_state% dXi(nz) = f_np1(nz-2) - f_n(nz-2) ! Neumann BC at r=L
+      ! Neumann BC at r=0: gradient = 0, so dXi(1) = dXi(2)
+      adv_diff_state% dXi(1) = adv_diff_state% dXi(2) 
+      ! Neumann BC at r=L: gradient = 0, so dXi(nz) = dXi(nz-1)
+      adv_diff_state% dXi(nz) = adv_diff_state% dXi(nz-1)
 
       if ( debug_backward_Euler ) then
          write(*,'(a16,a16,a16,a16)') 'k','f_n(k)', 'f_np1(k)', 'dXi(k)'
@@ -712,6 +768,7 @@ contains
       real(kind=dp), allocatable :: dXi(:)  ! change in the element's mass fraction
       real(kind=dp) :: dXi_max
       logical, allocatable :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable :: Xi_miscible_min(:), Xi_miscible_max(:)  ! miscible element mass fraction
       integer :: k_update
       real(kind=dp) :: dXi_debug
 
@@ -731,7 +788,7 @@ contains
 
          if ( debug_bottom_up_rain ) write(*,*) 'do_bottom_up_rain: k_update: ', k_update
 
-         call get_dXi(s, k_update, s% nz, dXi, is_miscible, ierr)
+         call get_dXi(s, k_update, s% nz, dXi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
          if (ierr /= 0) then
             write(*,*) 'do_bottom_up_rain: error in get_dXi'
             if (allocated(dXi)) deallocate(dXi)
@@ -741,6 +798,11 @@ contains
 
          if (.not. allocated(dXi)) then
             cycle
+         end if
+
+         if (debug_bottom_up_rain) then
+            k_debug = maxloc(abs(dXi), dim=1)
+            write(*,*) 'do_bottom_up_rain: k_update, k_max, dXi_max = ', k_update, k_debug, dXi(k_debug)
          end if
 
          call adjust_mass_fractions(s, dXi(1:s% nz), ierr)
@@ -754,9 +816,9 @@ contains
          call check_after_rain(s, 1, s% nz, xa_pre, ierr)
 
          ! adjust model after mixing
-         call update_model_(s, 1, s% nz, .true.)
+         ! call update_model_(s, 1, s% nz, .false.)
 
-         deallocate(dXi, is_miscible)
+         deallocate(dXi, is_miscible, Xi_miscible_min, Xi_miscible_max)
 
       end do
 
@@ -814,6 +876,7 @@ contains
       real(kind=dp), allocatable :: xa_pre(:,:)
       real(kind=dp), allocatable :: dXi(:)  ! change in the element's mass fraction
       logical, allocatable :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable :: Xi_miscible_min(:), Xi_miscible_max(:)  ! miscible element mass fraction
       include 'formats'
 
       ierr = 0 ! 0 means AOK
@@ -828,7 +891,7 @@ contains
          if (verbose) write(*,*) 'do_instant_rain: iteration: ', j
          xa_pre = s%xa
 
-         call get_dXi(s, 1, s%nz, dXi, is_miscible, ierr)
+         call get_dXi(s, 1, s%nz, dXi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
          if (ierr /= 0) then
             write(*,*) 'do_instant_rain: error in get_dXi'
             if (allocated(dXi)) deallocate(dXi)
@@ -849,7 +912,7 @@ contains
 
          ! call adjust_mixing_in_sedimenting_region(s, is_miscible, ierr)
 
-         deallocate(dXi, is_miscible)
+         deallocate(dXi, is_miscible, Xi_miscible_min, Xi_miscible_max)
 
          if (all(abs(s%xa(i_Xi, 1:s% nz)-xa_pre(i_Xi,1:s% nz)) < small)) exit
 
@@ -900,15 +963,30 @@ contains
          call check_abundance_array(s% xa(i, 1:s% nz), klo, khi, check_range, monotonicity_method, ierr, mask = (s% mixing_type(klo:khi)/=no_mixing))
       end do
 
-      if ( verbose ) then
-         k_debug = maxloc(abs(s%xa(i_Xi, klo:khi)-xa_pre(i_Xi, klo:khi)), dim=1)
-         if (verbose) write(*,*) 'maximum difference: (k, dXi)', k_debug,  abs(s%xa(i_Xi, k_debug)-xa_pre(i_Xi, k_debug))
-      end if
+      call print_maximum_abundance_change(s% xa(i_Xi, klo:khi), xa_pre(i_Xi, klo:khi), do_check = verbose)
 
       if ( ierr /= 0 ) then
          call mesa_error(__FILE__,__LINE__)
       end if
    end subroutine check_after_rain
+
+   subroutine print_maximum_abundance_change(Xi, Xi_ref, do_check)
+      ! checks whether the maximum difference between Xi and Xi_ref is below a certain threshold
+      real(kind=dp), intent(in) :: Xi(:)  ! element mass fraction
+      real(kind=dp), intent(in) :: Xi_ref(:)  ! reference element mass fraction
+      logical, intent(in) :: do_check  ! whether to perform the check
+
+      integer :: k_max
+      real(kind=dp) :: diff_max
+
+      if (.not. do_check) return
+
+      k_max = maxloc(abs(Xi - Xi_ref), dim=1)
+      diff_max = abs(Xi(k_max) - Xi_ref(k_max))
+
+      write(*,*) 'print_maximum_abundance_change: maximum difference: ', diff_max, ' at k = ', k_max
+      
+   end subroutine print_maximum_abundance_change
 
    subroutine get_raw_miscibility(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       ! miscibility without any post-processing
@@ -957,17 +1035,17 @@ contains
 
    end subroutine get_raw_miscibility
 
-   subroutine get_dXi(s, klo, khi, dXi, is_miscible, ierr)
+   subroutine get_dXi(s, klo, khi, dXi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       type (star_info), pointer :: s
       integer, intent(in) :: klo, khi  ! range of zones to consider
       real(kind = dp), allocatable, intent(out) :: dXi(:)  ! difference between the miscible and the actual element mass fraction
       logical, allocatable, intent(out) :: is_miscible(:)  ! miscible regions
+      real(kind=dp), allocatable, intent(out)  :: Xi_miscible_min(:), Xi_miscible_max(:)
       integer, intent(out) :: ierr
 
       ! local
-      integer :: n_immiscible_threshold = 5  ! if the number of immiscible zones is less than this, we don't need to do anything
+      integer :: n_immiscible_threshold = 30  ! if the number of immiscible zones is less than this, we don't need to do anything
       integer :: k, i, op_err
-      real(kind=dp), allocatable :: Xi_miscible_min(:), Xi_miscible_max(:)
       integer :: k_debug ! utils
 
       call get_raw_miscibility(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
@@ -1112,7 +1190,7 @@ contains
       end if
 
       ! homogenize convective envelope
-      if (sedimentation_method == instant_rain .or. klo == 1 ) then
+      if (.true.) then
          call homogenize_convective_envelope(s, is_miscible, Xi_miscible_min, Xi_miscible_max, klo, khi, Xi_temp, ierr)
          if (ierr /= 0) then
             write(*,*) 'set_dXi: error in homogenize_convective_envelope'
@@ -2696,7 +2774,7 @@ contains
       ! Calculate the stability parameter
       alpha = D * dt / (dxCell * dxSurf)
 
-      alpha_max = max(alpha_max, alpha)  ! keep track of the maximum alpha value for debugging
+      alpha_min = min(alpha_min, alpha)  ! keep track of the maximum alpha value for debugging
 
    end function alpha
 
