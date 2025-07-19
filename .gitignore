@@ -42,4 +42,5 @@ LOGS
 restart_photo
 .mesa_temp_cache
 *.yml
+.DS_Store
 element_sedimentation/backup/

@@ -190,6 +190,7 @@ contains
 
       
    end function solver_iterations_from_timescales
+
    subroutine do_advection_diffusion_rain(s, ierr)
       type (star_info), pointer :: s
       integer, intent(out) :: ierr
@@ -262,6 +263,13 @@ contains
 
          ! make sure we don't go out of bounds
          call limit_dXi_to_physical_range(s, adv_diff_state, ierr)
+
+         ! make sure we are conserving mass
+         call enforce_mass_conservation(s, adv_diff_state, ierr)
+         if (ierr /= 0) then
+            write(*,*) 'backward_Euler_step: error in enforce_mass_conservation'
+            return
+         end if
 
          call adjust_mass_fractions(s, adv_diff_state% dXi, ierr)
 
@@ -533,7 +541,7 @@ contains
 
       real(dp), allocatable :: dXi_local(:)  ! change in the element's mass fraction from get_dXi
 
-      integer :: k_buffer = 25
+      integer :: k_buffer = 10 ! 25
       integer :: k_core, k
 
       ierr = 0 ! 0 means AOK
@@ -708,6 +716,80 @@ contains
 
 
    end subroutine free_advection_diffusion_state
+
+   real(dp) function relative_difference_from_zero(mass_increase, mass_decrease)
+      real(dp), intent(in) :: mass_increase, mass_decrease
+   
+      real(dp) :: typical_scale
+      real(dp) :: relative_error
+
+      typical_scale = max(abs(mass_increase), abs(mass_decrease))
+
+      if (typical_scale == 0d0) then
+         relative_difference_from_zero = 0d0  ! avoid division by zero
+      else
+         relative_difference_from_zero = abs(mass_increase + mass_decrease) / typical_scale
+      end if
+
+      if (debug_advection_diffusion_solver) then
+         write(*,*) 'relative_difference_from_zero: mass_increase = ', mass_increase, ' mass_decrease = ', mass_decrease, ' relative difference = ', relative_difference_from_zero
+      end if
+      
+   end function relative_difference_from_zero
+
+   subroutine enforce_mass_conservation(s, adv_diff_state, ierr)
+      type (star_info), pointer :: s
+      type(advection_diffusion_state), intent(inout) :: adv_diff_state
+      integer, intent(out) :: ierr
+
+      ! local variables
+      integer :: k
+      real(kind=dp) :: mass_increase, mass_decrease
+      real(kind=dp) :: scaling_factor
+      logical, allocatable :: increasing_cell(:)
+
+      ierr = 0 ! 0 means AOK
+
+      allocate(increasing_cell(1:adv_diff_state%nz))  ! initialize all cells as not increasing
+      increasing_cell = merge(.true., .false., adv_diff_state%dXi > 0d0)  ! cells with positive change in mass fraction
+
+      mass_increase = dot_product(pack(adv_diff_state%dXi, increasing_cell), pack(s% dm(1: s% nz), increasing_cell))
+      mass_decrease = dot_product(pack(adv_diff_state%dXi, .not. increasing_cell), pack(s% dm(1: s% nz), .not. increasing_cell))
+      ! mass_abundance_change = dot_product(adv_diff_state % dXi, adv_diff_state % dr)
+
+      
+      ! if the mass is sufficienly conserved, return
+      if (relative_difference_from_zero(mass_increase,mass_decrease) < small) then
+         if (debug_advection_diffusion_solver .or. .true.) write(*,*) 'enforce_mass_conservation: mass is sufficiently conserved, returning'
+         if (debug_advection_diffusion_solver .or. .true.) write(*,*) 'mass_increase = ', mass_increase, ' mass_decrease = ', mass_decrease, ' relative difference = ', relative_difference_from_zero(mass_increase, mass_decrease)
+         deallocate(increasing_cell)
+         return
+      end if
+
+      ! if not, we need to adjust the mass fractions
+      ! we always damp instead of increasing the mass fraction
+      if (mass_increase > -mass_decrease) then
+         scaling_factor = - mass_decrease / mass_increase
+         where (increasing_cell) adv_diff_state%dXi = scaling_factor * adv_diff_state%dXi
+      else
+         scaling_factor = - mass_increase / mass_decrease
+         where (.not. increasing_cell) adv_diff_state%dXi = scaling_factor * adv_diff_state%dXi
+      end if
+
+      ! test mass conservation once more
+      mass_increase = dot_product(pack(adv_diff_state%dXi, increasing_cell), pack(s% dm(1: s% nz), increasing_cell))
+      mass_decrease = dot_product(pack(adv_diff_state%dXi, .not. increasing_cell), pack(s% dm(1: s% nz), .not. increasing_cell))
+      
+      if (relative_difference_from_zero(mass_increase,mass_decrease) > small) then
+         write(*,*) 'enforce_mass_conservation: mass conservation failed after scaling'
+         write(*,*) 'mass_increase = ', mass_increase, ' mass_decrease = ', mass_decrease, ' relative difference = ', relative_difference_from_zero(mass_increase, mass_decrease)
+         write(*,*) 'scaling_factor = ', scaling_factor
+         call mesa_error(__FILE__, __LINE__, 'enforce_mass_conservation: mass conservation failed after scaling')
+      end if
+
+      deallocate(increasing_cell)
+
+   end subroutine enforce_mass_conservation
 
    subroutine backward_Euler_step(adv_diff_state, ierr)
       type(advection_diffusion_state), intent(inout) :: adv_diff_state
@@ -1044,7 +1126,7 @@ contains
       integer, intent(out) :: ierr
 
       ! local
-      integer :: n_immiscible_threshold = 30  ! if the number of immiscible zones is less than this, we don't need to do anything
+      integer :: n_immiscible_threshold = 5  ! if the number of immiscible zones is less than this, we don't need to do anything (for advection-diffusion ~20 is fine)
       integer :: k, i, op_err
       integer :: k_debug ! utils
 
@@ -2456,28 +2538,6 @@ contains
       !$OMP END PARALLEL DO
 
       s% xa(i_Xi, 1:s% nz) = s% xa(i_Xi, 1:s% nz) + dXi(1:s% nz)
-
-      ! For the advection-diffusion method, we can sometimes jump beyond the ranges.
-      ! The code below renormalizes, but it does not conserve X, Y, and Z.
-      ! if (sedimentation_method == advection_diffusion_rain) then
-      !    do k = 1, s%nz
-      !       ! map s % xa(:,k) to the range [0, 1]
-      !       xa_min = minval(s%xa(:,k))
-      !       xa_max = maxval(s%xa(:,k))
-
-      !       if (xa_min >= 0d0 .and. xa_max <= 1d0) cycle  ! already in the range [0, 1]
-
-      !       if (xa_min < 0d0) s% xa(:,k) = (s%xa(:,k) - xa_min) / (xa_max - xa_min)
-
-      !       xa_sum = sum(s%xa(:,k))
-
-      !       ! normalize
-      !       s % xa(:,k) = s % xa(:,k) / xa_sum
-      !    end do
-      ! end if
-
-      ! HHK: test that again we conserved mass
-
 
    end subroutine adjust_mass_fractions
 
