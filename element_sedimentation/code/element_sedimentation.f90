@@ -178,7 +178,7 @@ contains
       else
          longest_timescale = max(adv_diff_state% tau_conv, adv_diff_state% tau_settle)
       end if
-      
+
       if (longest_timescale <= 0d0) then
          write(*,*) 'solver_iterations_from_timescales: longest_timescale is non-positive, returning 1'
          ierr = 1
@@ -188,7 +188,7 @@ contains
       solver_iterations_from_timescales = min(nint(longest_timescale / adv_diff_state% dt), max_iterations)
 
 
-      
+
    end function solver_iterations_from_timescales
 
    subroutine do_advection_diffusion_rain(s, ierr)
@@ -265,7 +265,7 @@ contains
          call limit_dXi_to_physical_range(s, adv_diff_state, ierr)
 
          ! make sure we are conserving mass
-         call enforce_mass_conservation(s, adv_diff_state, ierr)
+         call enforce_mass_conservation(s, adv_diff_state % dXi, ierr)
          if (ierr /= 0) then
             write(*,*) 'backward_Euler_step: error in enforce_mass_conservation'
             return
@@ -276,7 +276,7 @@ contains
          ! check if the change in the element's mass fraction is below a threshold
          ! h = heterogeneity(adv_diff_state% dXi, s% dm(1:s% nz))
          ! if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: h, max(|dXi|) = ', h, maxval(abs(adv_diff_state% dXi))
-         
+
          ! dXi_max = maxval(s% xa(i_Xi, 1:s% nz) - s% xa_old(i_Xi, 1:s% nz))
          ! if (dXi_max >= dXi_max_crit) then ! 2-5d-8
          !    if (verbose) write(*,*) 'do_advection_diffusion_rain: mass fraction changed beyond threshold: ', &
@@ -719,7 +719,7 @@ contains
 
    real(dp) function relative_difference_from_zero(mass_increase, mass_decrease)
       real(dp), intent(in) :: mass_increase, mass_decrease
-   
+
       real(dp) :: typical_scale
       real(dp) :: relative_error
 
@@ -734,12 +734,12 @@ contains
       if (debug_advection_diffusion_solver) then
          write(*,*) 'relative_difference_from_zero: mass_increase = ', mass_increase, ' mass_decrease = ', mass_decrease, ' relative difference = ', relative_difference_from_zero
       end if
-      
+
    end function relative_difference_from_zero
 
-   subroutine enforce_mass_conservation(s, adv_diff_state, ierr)
+   subroutine enforce_mass_conservation(s, dXi, ierr)
       type (star_info), pointer :: s
-      type(advection_diffusion_state), intent(inout) :: adv_diff_state
+      real(kind=dp), intent(inout) :: dXi(:)  ! change in element mass fraction
       integer, intent(out) :: ierr
 
       ! local variables
@@ -750,18 +750,17 @@ contains
 
       ierr = 0 ! 0 means AOK
 
-      allocate(increasing_cell(1:adv_diff_state%nz))  ! initialize all cells as not increasing
-      increasing_cell = merge(.true., .false., adv_diff_state%dXi > 0d0)  ! cells with positive change in mass fraction
+      allocate(increasing_cell(1:s%nz))  ! initialize all cells as not increasing
+      increasing_cell = merge(.true., .false., dXi > 0d0)  ! cells with positive change in mass fraction
 
-      mass_increase = dot_product(pack(adv_diff_state%dXi, increasing_cell), pack(s% dm(1: s% nz), increasing_cell))
-      mass_decrease = dot_product(pack(adv_diff_state%dXi, .not. increasing_cell), pack(s% dm(1: s% nz), .not. increasing_cell))
-      ! mass_abundance_change = dot_product(adv_diff_state % dXi, adv_diff_state % dr)
+      mass_increase = dot_product(pack(dXi, increasing_cell), pack(s% dm(1: s% nz), increasing_cell))
+      mass_decrease = dot_product(pack(dXi, .not. increasing_cell), pack(s% dm(1: s% nz), .not. increasing_cell))
 
-      
+
       ! if the mass is sufficienly conserved, return
-      if (relative_difference_from_zero(mass_increase,mass_decrease) < small) then
-         if (debug_advection_diffusion_solver .or. .true.) write(*,*) 'enforce_mass_conservation: mass is sufficiently conserved, returning'
-         if (debug_advection_diffusion_solver .or. .true.) write(*,*) 'mass_increase = ', mass_increase, ' mass_decrease = ', mass_decrease, ' relative difference = ', relative_difference_from_zero(mass_increase, mass_decrease)
+      if (relative_difference_from_zero(mass_increase, mass_decrease) < small) then
+         if (debug) write(*,*) 'enforce_mass_conservation: mass is sufficiently conserved, returning'
+         if (debug) write(*,*) 'mass_increase = ', mass_increase, ' mass_decrease = ', mass_decrease, ' relative difference = ', relative_difference_from_zero(mass_increase, mass_decrease)
          deallocate(increasing_cell)
          return
       end if
@@ -770,16 +769,16 @@ contains
       ! we always damp instead of increasing the mass fraction
       if (mass_increase > -mass_decrease) then
          scaling_factor = - mass_decrease / mass_increase
-         where (increasing_cell) adv_diff_state%dXi = scaling_factor * adv_diff_state%dXi
+         where (increasing_cell) dXi = scaling_factor * dXi
       else
          scaling_factor = - mass_increase / mass_decrease
-         where (.not. increasing_cell) adv_diff_state%dXi = scaling_factor * adv_diff_state%dXi
+         where (.not. increasing_cell) dXi = scaling_factor * dXi
       end if
 
       ! test mass conservation once more
-      mass_increase = dot_product(pack(adv_diff_state%dXi, increasing_cell), pack(s% dm(1: s% nz), increasing_cell))
-      mass_decrease = dot_product(pack(adv_diff_state%dXi, .not. increasing_cell), pack(s% dm(1: s% nz), .not. increasing_cell))
-      
+      mass_increase = dot_product(pack(dXi, increasing_cell), pack(s% dm(1: s% nz), increasing_cell))
+      mass_decrease = dot_product(pack(dXi, .not. increasing_cell), pack(s% dm(1: s% nz), .not. increasing_cell))
+
       if (relative_difference_from_zero(mass_increase,mass_decrease) > small) then
          write(*,*) 'enforce_mass_conservation: mass conservation failed after scaling'
          write(*,*) 'mass_increase = ', mass_increase, ' mass_decrease = ', mass_decrease, ' relative difference = ', relative_difference_from_zero(mass_increase, mass_decrease)
@@ -824,7 +823,7 @@ contains
       ! Interior points (solved by tridiagonal system)
       adv_diff_state% dXi(2:nz-1) = f_np1(1:nz-2) - f_n(1:nz-2) ! interior points
       ! Neumann BC at r=0: gradient = 0, so dXi(1) = dXi(2)
-      adv_diff_state% dXi(1) = adv_diff_state% dXi(2) 
+      adv_diff_state% dXi(1) = adv_diff_state% dXi(2)
       ! Neumann BC at r=L: gradient = 0, so dXi(nz) = dXi(nz-1)
       adv_diff_state% dXi(nz) = adv_diff_state% dXi(nz-1)
 
@@ -1067,7 +1066,7 @@ contains
       diff_max = abs(Xi(k_max) - Xi_ref(k_max))
 
       write(*,*) 'print_maximum_abundance_change: maximum difference: ', diff_max, ' at k = ', k_max
-      
+
    end subroutine print_maximum_abundance_change
 
    subroutine get_raw_miscibility(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
@@ -1126,7 +1125,7 @@ contains
       integer, intent(out) :: ierr
 
       ! local
-      integer :: n_immiscible_threshold = 5  ! if the number of immiscible zones is less than this, we don't need to do anything (for advection-diffusion ~20 is fine)
+      integer :: n_immiscible_threshold = 0  ! if the number of immiscible zones is less than this, we don't need to do anything (for advection-diffusion ~20 is fine); previously 5
       integer :: k, i, op_err
       integer :: k_debug ! utils
 
@@ -1145,6 +1144,10 @@ contains
 
       ! get the difference between the miscible and the actual element mass fraction in the precipitating region
       call set_dXi(s, is_miscible, Xi_miscible_min, Xi_miscible_max, 1, s% nz, dXi, ierr)
+
+      if (.not. is_mass_conserved(dXi, s% dm(1:s% nz))) then
+         call mesa_error(__FILE__, __LINE__, 'get_dXi: mass is not conserved after set_dXi')
+      end if
 
    end subroutine get_dXi
 
@@ -1198,7 +1201,11 @@ contains
       real(kind=dp), allocatable :: Xi_temp(:)  ! temporary array to hold the mass fractions
       real(kind=dp), allocatable :: Xi_miscible_min_monotonic(:)  ! miscible element mass fraction, monotonically increasing
       real(kind=dp), allocatable :: Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically decreasing
-      integer :: k, j, k_core, k_rain, k_RCB
+      integer :: k, j
+      integer :: k_RCB        ! radiative-convective boundary (between atmosphere and convective envelope)
+      integer :: k_rain       ! bottom of the precipitating region
+      integer :: k_deposite   ! last cell where we can deposit material from a precipitating region
+      integer :: k_core       ! top of the core (oversaturated region that forms from the center out)
       logical :: it_rains
       logical :: has_core  ! whether we have a core
 
@@ -1206,7 +1213,7 @@ contains
 
       allocate(Xi_temp(klo:khi), source=s% xa(i_Xi, klo:khi))
 
-      call init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_core, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+      call init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_deposite, k_core, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
       if (ierr /= 0) then
          write(*,*) 'set_dXi: error in init_set_dXi'
          return
@@ -1240,7 +1247,7 @@ contains
             end if
 
             ! if the mass fraction is in the immiscible region, transfer it to the deposite below
-            call transfer_Xi(s, Xi_temp, Xi_miscible_min_monotonic, k, k+1, k_core-1, ierr)
+            call transfer_Xi(s, Xi_temp, Xi_miscible_min_monotonic, k, k+1, k_deposite, ierr)
             if (ierr /= 0) then
                write(*,*) 'set_dXi: error in transfer_Xi for rain condition'
                return
@@ -1636,16 +1643,17 @@ contains
       end if
    end function
 
-   subroutine init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_core, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+   subroutine init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_deposite, k_core, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
       ! initializes the parameters for set_dXi
       type (star_info), pointer :: s
       integer, intent(in) :: klo, khi  ! region in which we transfer the element
       logical, allocatable, intent(in) :: is_miscible(:)  ! miscible regions
       real(kind=dp), allocatable, intent(in) :: Xi_miscible_min(:)
       real(kind=dp), allocatable, intent(in) :: Xi_miscible_max(:)  ! miscible element mass fraction
-      integer, intent(out) :: k_RCB  ! index of the radiative-convective boundary
-      integer, intent(out) :: k_rain  ! index of the rain threshold
-      integer, intent(out) :: k_core  ! index of the core
+      integer, intent(out) :: k_RCB       ! index of the radiative-convective boundary
+      integer, intent(out) :: k_rain      ! index of the rain threshold
+      integer, intent(out) :: k_deposite  ! index of the deposition threshold
+      integer, intent(out) :: k_core      ! index of the core
       real(kind=dp), allocatable, intent(inout) :: Xi_miscible_min_monotonic(:)  ! miscible element mass fraction, monotonically increasing
       real(kind=dp), allocatable, intent(inout) :: Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically decreasing
       integer, intent(out) :: ierr  ! error code
@@ -1662,6 +1670,12 @@ contains
       call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, khi, k_rain, ierr)
       if (ierr /= 0) then
          write(*,*) 'set_dXi: error in find_k_rain'
+         return
+      end if
+
+      call find_k_deposite(s, klo, khi, k_rain, k_deposite, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'set_dXi: error in find_k_deposite'
          return
       end if
 
@@ -1749,6 +1763,51 @@ contains
 
    end subroutine find_RCB
 
+   subroutine find_k_deposite(s, klo, khi, k_rain, k_deposite, ierr)
+      ! finds the deposition region (k_deposite) in the region (klo, khi)
+      type (star_info), pointer :: s
+      integer, intent(in) :: klo, khi  ! region in which we search for the deposition region
+      integer, intent(in) :: k_rain  ! index of the last cell where the model is immiscible outside the core
+      integer, intent(out) :: k_deposite  ! index of the deposition region
+      integer, intent(out) :: ierr  ! error code
+
+      ! local variables
+      integer :: k
+
+      ierr = 0 ! 0 means AOK
+      k_deposite = -1  ! initialize to -1, meaning that we haven't found the deposition region yet
+      do k = k_rain + 2, khi
+         if ( s% mixing_type(k) == no_mixing) then
+            k_deposite = k - 1  ! we found the deposition region
+            exit
+         end if
+      end do
+
+      if ( k_deposite == -1 ) then
+         ! no deposition region found, use the entire region as the deposition region
+         k_deposite = khi
+      end if
+
+      if ( k_deposite < klo .or.k_deposite > khi) then
+         ierr = 1
+         write(*,*) 'find_k_deposite: deposition region out of bounds'
+         write(*,*) 'klo, khi, k_deposite: ', klo, khi, k_deposite
+         return
+      end if
+
+      if ( debug_set_dXi ) then
+         if (k_deposite > 0) then
+            write(*,*) 'find_k_deposite: found deposition region at k: ', k_deposite
+         end if
+      end if
+
+      if (.true.) then   ! HHK
+         write(*,*) 'find_k_deposite: found k_deposite: ', k_deposite
+         write(*,*) 'klo, k_rain, khi: ', klo, k_rain, khi
+      end if
+
+   end subroutine find_k_deposite
+
    subroutine find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, klo, khi, k_rain, ierr)
       ! finds the last index k_rain inside (klo,khi) where the the model is immiscible outside the core
       ! this is used to determine where to deposite helium
@@ -1776,7 +1835,7 @@ contains
             inside_core = .false.  ! we are now outside the core
          else if (.not. is_miscible(k) .and. .not. inside_core) then
             k_rain = k  ! we found the last index where the model is immiscible outside the core
-            if (debug) then
+            if (.true.) then   ! HHK
                write(*,*) 'find_k_rain: found k_rain: ', k_rain
                write(*,*) 'klo, khi: ', klo, khi
             end if
@@ -2171,48 +2230,7 @@ contains
 
    end subroutine unique_Ps_and_Ts
 
-   subroutine check_phase_diagram(pd, ierr)
-      type(phase_diagram), intent(inout) :: pd
-      integer, intent(out) :: ierr
-      integer :: i
 
-      do i = 1, pd%n_points-1
-
-         ! check that no (P, T) point is repeated
-         if (pd%P(i) == pd%P(i+1) .and. pd%T(i) == pd%T(i+1)) then
-            ierr = 1
-            write(*,*) 'check_phase_diagram: repeated (P, T) point in the phase diagram'
-            return
-         end if
-
-         ! check that He-rich is greater than He-poor
-         if (pd%He_rich(i) <= pd%He_poor(i)) then
-            ierr = 1
-            write(*,*) 'check_phase_diagram: He-rich is not greater than He-poor'
-            return
-         end if
-      end do
-
-      do i = 1, pd%num_unique_Ps-1
-
-         ! check that unique_P_index is strictly monotonically increasing
-         if (pd%unique_P_index(i) >= pd%unique_P_index(i+1)) then
-            ierr = 1
-            write(*,*) 'check_phase_diagram: unique_P_index is not strictly monotonically increasing'
-            return
-         end if
-
-         ! check that unique_P is strictly monotonically increasing
-         if (pd%unique_P(i) >= pd%unique_P(i+1)) then
-            ierr = 1
-            write(*,*) 'check_phase_diagram: unique_P is not strictly monotonically increasing'
-            return
-         end if
-
-      end do
-
-
-   end subroutine check_phase_diagram
 
    subroutine shutdown_phase_diagram()
       type(phase_diagram) :: pd
@@ -2517,9 +2535,18 @@ contains
       integer :: i, k, n_species
       real(kind=dp) :: f
       real(kind=dp) :: xa_min, xa_max, xa_sum
+      real(kind=dp), allocatable :: dX_array(:,:)
+
+      ! debugging
+      logical :: was_not_conserved = .false.
+
       ierr = 0 ! 0 means AOK
 
       n_species = size(s%xa, 1)
+
+      allocate(dX_array(n_species, s%nz), source=0d0)
+      dX_array(i_Xi, 1:s% nz) = dXi(1:s% nz)
+
       ! test that dXi is the same size as s%xa
       if (size(dXi) /= s% nz) then
          write(*,*) 'adjust_mass_fractions: dXi is not the same size as s%xa'
@@ -2528,16 +2555,44 @@ contains
       end if
 
       !$OMP PARALLEL DO PRIVATE(i, k, f) SCHEDULE(guided)
-      do i = 1, n_species
-         if (i == i_Xi) cycle
-         do k = 1, s% nz
-            f = 1d0-dXi(k)/(1d0 - s% xa(i_Xi, k))
-            s% xa(i, k) = f * s% xa(i, k)
+      do k = 1, s% nz
+
+         f = -dXi(k)/(1d0 - s% xa(i_Xi, k))
+
+         do i = 1, n_species
+            if (i == i_Xi) cycle
+            dX_array(i, k) = s% xa(i, k) * f
+
          end do
       end do
       !$OMP END PARALLEL DO
 
-      s% xa(i_Xi, 1:s% nz) = s% xa(i_Xi, 1:s% nz) + dXi(1:s% nz)
+      ! update the mass fractions enforcing mass conservation on the way.
+      do i = 1, n_species
+         call enforce_mass_conservation(s, dX_array(i, 1:s% nz), ierr)
+         if (ierr /= 0) then
+            write(*,*) 'adjust_mass_fractions: enforce_mass_conservation failed for species ', i
+            return
+         end if
+
+         s% xa(i, 1:s% nz) = s% xa(i, 1:s% nz) + dX_array(i, 1:s% nz)
+      end do
+
+      ! check mass conservation
+      if (debug) then
+         was_not_conserved = .false.
+         do i = 1, n_species
+            write(*,*) 'adjust_mass_fractions: checking mass conservation for species ', i
+            if (.not. is_mass_conserved(dX_array(i, 1: s% nz), s% dm(1: s% nz))) then
+               was_not_conserved = .true.
+            end if
+         end do
+         deallocate(dX_array)
+
+         if (was_not_conserved) then
+            call mesa_error(__FILE__, __LINE__,'adjust_mass_fractions: mass is not conserved.')
+         end if
+      end if
 
    end subroutine adjust_mass_fractions
 
@@ -3125,6 +3180,61 @@ contains
       heterogeneity = sqrt(h2)
 
    end function heterogeneity
+
+   !* checks
+   logical function is_mass_conserved(dXi, dm)
+      real(kind=dp), intent(in) :: dXi(:), dm(:)
+      is_mass_conserved = abs(dot_product(dXi, dm)/sum(dm)) < small
+      if ( .not. is_mass_conserved ) then
+         write(*,'(a,2(1pd26.16))') 'is_mass_conserved: mass is not conserved, dM, dM/M = ', dot_product(dXi, dm), dot_product(dXi, dm)/sum(dm)
+      else
+         if (debug) write(*,'(a,2(1pd26.16))') 'is_mass_conserved: mass is conserved, dM, dM/M = ', dot_product(dXi, dm), dot_product(dXi, dm)/sum(dm)
+      end if
+   end function is_mass_conserved
+
+
+   subroutine check_phase_diagram(pd, ierr)
+      type(phase_diagram), intent(inout) :: pd
+      integer, intent(out) :: ierr
+      integer :: i
+
+      do i = 1, pd%n_points-1
+
+         ! check that no (P, T) point is repeated
+         if (pd%P(i) == pd%P(i+1) .and. pd%T(i) == pd%T(i+1)) then
+            ierr = 1
+            write(*,*) 'check_phase_diagram: repeated (P, T) point in the phase diagram'
+            return
+         end if
+
+         ! check that He-rich is greater than He-poor
+         if (pd%He_rich(i) <= pd%He_poor(i)) then
+            ierr = 1
+            write(*,*) 'check_phase_diagram: He-rich is not greater than He-poor'
+            return
+         end if
+      end do
+
+      do i = 1, pd%num_unique_Ps-1
+
+         ! check that unique_P_index is strictly monotonically increasing
+         if (pd%unique_P_index(i) >= pd%unique_P_index(i+1)) then
+            ierr = 1
+            write(*,*) 'check_phase_diagram: unique_P_index is not strictly monotonically increasing'
+            return
+         end if
+
+         ! check that unique_P is strictly monotonically increasing
+         if (pd%unique_P(i) >= pd%unique_P(i+1)) then
+            ierr = 1
+            write(*,*) 'check_phase_diagram: unique_P is not strictly monotonically increasing'
+            return
+         end if
+
+      end do
+
+
+   end subroutine check_phase_diagram
 
 
 end module element_sedimentation
