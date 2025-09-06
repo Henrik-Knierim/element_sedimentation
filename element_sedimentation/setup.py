@@ -338,8 +338,12 @@ parser.add_argument(
     help="The command to execute.",
 )
 
+parser.add_argument('-f', '--filename', help='Filename for single operations')
+
 # Parse the arguments
 args = parser.parse_args()
+
+print(f"Executing command: {args.command}") if debug else None
 
 if args.command == "install":
 
@@ -508,8 +512,11 @@ elif args.command == "soft_reinstall":
 
 elif args.command == "single_install":
     # install a single file
-    # ask the user for the file name
-    file_name = input("Enter the file name: ")
+    # get filename from -f argument or ask user
+    if args.filename:
+        file_name = args.filename
+    else:
+        file_name = input("Enter the file name: ")
     file = InstallationFile(
         file_name,
         install_info[file_name]["replace"],
@@ -528,8 +535,11 @@ elif args.command == "single_install":
 
 elif args.command == "single_uninstall":
     # uninstall a single file
-    # ask the user for the file name
-    file_name = input("Enter the file name: ")
+    # get filename from -f argument or ask user
+    if args.filename:
+        file_name = args.filename
+    else:
+        file_name = input("Enter the file name: ")
     file = InstallationFile(
         file_name,
         install_info[file_name]["replace"],
@@ -548,9 +558,12 @@ elif args.command == "single_uninstall":
 
 elif args.command == "single_reinstall":
     # ask the user for the file name
-
     # first, restore the original file
-    file_name = input("Enter the file name: ")
+    if args.filename:
+        file_name = args.filename
+    else:
+        file_name = input("Enter the file name: ")
+
     file = InstallationFile(
         file_name,
         install_info[file_name]["replace"],
