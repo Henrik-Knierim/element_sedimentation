@@ -1016,7 +1016,6 @@ contains
       integer :: monotonicity_method
       logical :: check_range = .true.
 
-
       ierr = 0 ! 0 means AOK
 
 
@@ -1038,10 +1037,10 @@ contains
                klo, khi, M_chem/M_chem_pre, M_chem_pre, M_chem
          end if
 
-         ! TODO: Only check monotonicity in radiative regions.
+
          ! ? The error probably arises from ommiting mixing
          ! call find_RCB(s, klo, khi, k_RCB, ierr)
-         call check_abundance_array(s% xa(i, 1:s% nz), klo, khi, check_range, monotonicity_method, ierr, mask = (s% mixing_type(klo:khi)/=no_mixing))
+         call check_abundance_array(s% xa(i, 1:s% nz), klo, khi, check_range, monotonicity_method, ierr, mask = (xa_pre(i, klo:khi)/=s% xa(i, klo:khi)), Xi_ref = xa_pre(i, klo:khi))
       end do
 
       call print_maximum_abundance_change(s% xa(i_Xi, klo:khi), xa_pre(i_Xi, klo:khi), do_check = verbose)
@@ -1889,12 +1888,13 @@ contains
       both_radiative = (s%mixing_type(k) == no_mixing) .and. (s% mixing_type(j) == no_mixing)
    end function both_radiative
 
-   subroutine check_abundance_array(Xi, klo, khi, check_range, monotonicity_method, ierr, mask)
+   subroutine check_abundance_array(Xi, klo, khi, check_range, monotonicity_method, ierr, mask, Xi_ref)
       real(kind=dp), intent(in) :: Xi(:)
       integer, intent(in) :: klo, khi  ! indices of Xi to be checked
       logical, intent(in) :: check_range
       integer, intent(in) :: monotonicity_method
       logical, intent(in), optional :: mask(:)
+      real(kind=dp), intent(in), optional :: Xi_ref(:)  ! reference abundance array for motonicity check
       integer, intent(out) :: ierr
       integer, allocatable :: op_err(:)
 
@@ -1943,6 +1943,11 @@ contains
          !$OMP PARALLEL DO PRIVATE(k) SCHEDULE(guided)
          do k = klo, khi-1
             if ((Xi(k)-Xi(k+1))/Xi(k+1) > very_small .and. (local_mask(k) .and. local_mask(k+1))) then
+               if (present(Xi_ref)) then
+                  if ((Xi_ref(k)-Xi_ref(k+1))/Xi_ref(k+1) > very_small) then
+                     cycle  ! Skip this check if the reference array has the same monotonicity issue
+                  end if
+               end if
                op_err(k) = 1
             end if
          end do
@@ -1970,6 +1975,11 @@ contains
          !$OMP PARALLEL DO PRIVATE(k) SCHEDULE(guided)
          do k = klo, khi-1
             if ((Xi(k)-Xi(k+1))/Xi(k+1) < -very_small .and. (local_mask(k) .and. local_mask(k+1))) then
+               if (present(Xi_ref)) then
+                  if ((Xi_ref(k)-Xi_ref(k+1))/Xi_ref(k+1) < -very_small) then
+                     cycle  ! Skip this check if the reference array has the same monotonicity issue
+                  end if
+               end if
                op_err(k) = 1
             end if
          end do
