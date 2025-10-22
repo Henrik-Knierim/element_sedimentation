@@ -1,7 +1,7 @@
 ! anchor = 'phase_separation_no_diffusion, &'
     do_element_sedimentation, element_sedimentation_method, element_sedimentation_velocity_method, element_sedimentation_velocity, element_sedimentation_advection_diffusion_time_step_factor, element_sedimentation_maximum_dXi_per_cell, element_sedimentation_phase_diagram, element_sedimentation_phase_diagram_temperature_shift,element_sedimentation_extrapolate_phase_diagram, element_sedimentation_chemical_species, &
 ! anchor = 's% phase_separation_no_diffusion = phase_separation_no_diffusion'
- ! HHK: element sedimentation
+ ! element sedimentation
  s% do_element_sedimentation = do_element_sedimentation
  s% element_sedimentation_method = element_sedimentation_method
  s% element_sedimentation_velocity_method = element_sedimentation_velocity_method
@@ -13,7 +13,7 @@
  s% element_sedimentation_extrapolate_phase_diagram = element_sedimentation_extrapolate_phase_diagram
  s% element_sedimentation_chemical_species = element_sedimentation_chemical_species
 ! anchor = 'phase_separation_no_diffusion = s% phase_separation_no_diffusion'
- ! HHK: element sedimentation
+ ! element sedimentation
  do_element_sedimentation = s% do_element_sedimentation
  element_sedimentation_method = s% element_sedimentation_method
  element_sedimentation_velocity_method = s% element_sedimentation_velocity_method

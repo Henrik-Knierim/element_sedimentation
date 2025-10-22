@@ -29,8 +29,8 @@ install_info = {
     "star_data_step_work.inc": {"mesa_path": "star_data/public", "replace": False},
 }
 
-verbose = True
-debug = True
+verbose = False
+debug = False
 
 
 # modes of the installation file

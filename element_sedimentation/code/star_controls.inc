@@ -1,6 +1,6 @@
 ! anchor = 'character (len=32) :: phase_separation_option'
          
-         ! HHK: element sedimentation parameters
+         ! element sedimentation parameters
          logical        :: do_element_sedimentation
          character(len=strlen)   :: element_sedimentation_method
          character(len=strlen)   :: element_sedimentation_velocity_method

@@ -4,7 +4,7 @@
          use element_sedimentation, only: do_element_sedimentation
 ! anchor = 's% okay_to_set_mixing_info = .false.'
                
-               ! HHK: element sedimentation
+               ! element sedimentation
                if (s% do_element_sedimentation) then
                   do k = 1, s% nz
                      s% energy_start(k) = s% energy(k)
@@ -19,7 +19,7 @@
                   end do
                end if
 ! anchor = 's% total_energy_from_phase_separation = 0d0'; prepend
-            ! HHK: element sedimentation
+            ! element sedimentation
             s% total_energy_from_element_sedimentation = 0d0
             if (s% do_element_sedimentation) then
                s% total_energy_from_element_sedimentation = &

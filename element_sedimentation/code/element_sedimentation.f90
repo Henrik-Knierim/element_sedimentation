@@ -41,7 +41,7 @@ module element_sedimentation
    logical :: debug_set_dXi = .false.
    logical :: debug_bottom_up_rain = .false.
    logical :: debug_backward_Euler = .false.
-   logical :: verbose = .true.
+   logical :: verbose = .false.
    logical :: first_call
    logical :: custom_debug = .false. ! for dirty debugging
    logical :: extrapolate = .false.
@@ -808,7 +808,7 @@ contains
 
       ! Set tridiagonal matrix coefficients
       ! a(1) and c(-1) are not used
-      call setup_tridiagonal(adv_diff_state, a, b, c)  ! hhk
+      call setup_tridiagonal(adv_diff_state, a, b, c)
 
       f_n(1:nz-2) = adv_diff_state% Xi(2:nz-1)
       f_np1 = f_n
@@ -1800,7 +1800,7 @@ contains
          end if
       end if
 
-      if (.true.) then   ! HHK
+      if (.true.) then
          write(*,*) 'find_k_deposite: found k_deposite: ', k_deposite
          write(*,*) 'klo, k_rain, khi: ', klo, k_rain, khi
       end if
@@ -1834,7 +1834,7 @@ contains
             inside_core = .false.  ! we are now outside the core
          else if (.not. is_miscible(k) .and. .not. inside_core) then
             k_rain = k  ! we found the last index where the model is immiscible outside the core
-            if (.true.) then   ! HHK
+            if (.true.) then
                write(*,*) 'find_k_rain: found k_rain: ', k_rain
                write(*,*) 'klo, khi: ', klo, khi
             end if
@@ -3104,7 +3104,7 @@ contains
       !    m_min = s%m(khi)
       ! end if
 
-      ! s% D_mix(klo:khi) = 0d0  ! turn everything off for now; HHK
+      ! s% D_mix(klo:khi) = 0d0  ! turn everything off for now;
 
       if (verbose) write(*,'(a,2i12,3f26.16)') 'zone_boundaries_by_mass: klo, khi, m_max, m_min, dm = ', klo, khi, m_min/m_jupiter, m_max/m_jupiter, (m_max-m_min)/m_jupiter
 
