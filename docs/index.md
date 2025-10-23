@@ -1,7 +1,4 @@
-
-## Details
-
-This repository contains two folders: `helium_rain` and `planet_helium_rain`. The `helium_rain` folder contains the code for the helium rain algorithm, while the `planet_helium_rain` folder is a test suite for the helium rain algorithm.
+# Details
 
 ## Files
 - `element_sedimentation.f90`: The main Fortran module implementing element sedimentation.

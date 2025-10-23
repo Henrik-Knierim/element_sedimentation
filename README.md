@@ -1,9 +1,10 @@
 # element_sedimentation
-An implementation of element sedimentation in MESA.
+An implementation of element sedimentation in MESA. This repository contains two important folders: `helium_rain` and `planet_helium_rain`. The `helium_rain` folder contains the code for the helium rain algorithm, while the `planet_helium_rain` folder is a test case for the helium rain algorithm.
 
 ## Quickstart
 ### Installation
 Go inside the `element_sedimentation` directory and run `python setup.py install` to install the helium rain package. This will copy the Fortran source files into your MESA project and compile them. Afterwards, run `./mk` inside the test suite `planet_helium_rain` to check if everything is working correctly. For your own project, don't forget to run `./clean` and `./mk` to ensure that the new files are compiled correctly.
+
 ### Options
 The current options for helium rain are (reproduced from the `&controls` reference file of your MESA project):
 
@@ -116,3 +117,4 @@ The current options for helium rain are (reproduced from the `&controls` referen
 
     element_sedimentation_chemical_species = 'he4'
 ```
+For more details on the code and options, see the documentation in `docs/index.md`.
