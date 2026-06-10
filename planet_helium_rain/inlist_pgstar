@@ -13,8 +13,7 @@
 	Profile_Panels1_file_flag = .false.
 
   pgstar_interval = 1
-
-  pause = .false.
+    pause_flag = .true.
   
   ! TRho Profile window
   ! ===================

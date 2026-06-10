@@ -11,3 +11,4 @@
          real(dp)       :: element_sedimentation_phase_diagram_temperature_shift
          logical        :: element_sedimentation_extrapolate_phase_diagram
          character(len=strlen)   :: element_sedimentation_chemical_species
+         integer         :: element_sedimentation_cell_threshold_for_precipitation

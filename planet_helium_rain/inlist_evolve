@@ -103,9 +103,10 @@
    ! helium rain
    ! ==========
    do_element_sedimentation = .true.
-   element_sedimentation_maximum_dXi_per_cell = -1d0
-   element_sedimentation_method = 'instant_rain'
-   element_sedimentation_phase_diagram_temperature_shift = 0d0
+   element_sedimentation_maximum_dXi_per_cell = -1d0 !0.01d0
+   element_sedimentation_method = 'advection_diffusion_rain'
+   element_sedimentation_velocity = -1d2
+   element_sedimentation_phase_diagram_temperature_shift = -350d0
    element_sedimentation_phase_diagram = 'src/Schoettler+2018.csv'
 
 

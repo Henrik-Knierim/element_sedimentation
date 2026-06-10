@@ -107,3 +107,13 @@
       ! ::
 
     element_sedimentation_chemical_species = 'he4'
+
+      ! element_sedimentation_cell_threshold_for_precipitation
+      ! ~~~~~~~~~~~~~~
+
+      ! Minimum number of cells that should be precipitating for the sedimentation to be applied. 
+      ! Can help with convergence if only a few cells are precipitating.
+
+      ! ::
+
+    element_sedimentation_cell_threshold_for_precipitation = 0
