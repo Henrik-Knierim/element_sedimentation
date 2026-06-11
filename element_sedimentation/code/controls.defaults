@@ -116,4 +116,4 @@
 
       ! ::
 
-    element_sedimentation_cell_threshold_for_precipitation = 0
+    element_sedimentation_cell_threshold_for_precipitation = 1

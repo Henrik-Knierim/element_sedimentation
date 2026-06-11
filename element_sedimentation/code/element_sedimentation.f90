@@ -35,13 +35,7 @@ module element_sedimentation
 
    integer :: i_Xi = -1
    logical :: debug = .false.
-   logical :: debug_advection_diffusion_solver = .false.
-   logical :: debug_number_fraction_scaling = .false.
-   logical :: debug_phase_diagram = .false.
-   logical :: debug_set_dXi = .false.
-   logical :: debug_bottom_up_rain = .false.
-   logical :: debug_backward_Euler = .false.
-   logical :: verbose = .false.
+   logical :: verbose = .true.
    logical :: first_call
    logical :: extrapolate = .false.
    logical :: damp_sedimentation ! originally, damping was determined via do_gentle_mixing. Since gentle_mixing is not officially supported, I decided to make this module self-contained.
@@ -103,7 +97,7 @@ contains
 
       extrapolate = s% element_sedimentation_extrapolate_phase_diagram
 
-      if (debug_phase_diagram) call print_phase_diagram(immiscibility_phase_diagram)
+      if (debug) call print_phase_diagram(immiscibility_phase_diagram)
 
       ! set index of sedimenting species
       i_Xi = s% net_iso(chem_get_iso_id(trim(s% element_sedimentation_chemical_species)))
@@ -254,7 +248,7 @@ contains
          call backward_Euler_step(adv_diff_state, ierr)
          if (ierr /= 0) return
 
-         if (debug_advection_diffusion_solver) then
+         if (debug) then
             do j = 1, adv_diff_state%nz
                write(*,*) 'do_advection_diffusion_rain: (k, Xi(k), dXi(k)) = ', j, adv_diff_state% Xi(j), adv_diff_state% dXi(j)
             end do
@@ -274,7 +268,7 @@ contains
 
          ! check if the change in the element's mass fraction is below a threshold
          ! h = heterogeneity(adv_diff_state% dXi, s% dm(1:s% nz))
-         ! if (debug_advection_diffusion_solver) write(*,*) 'do_advection_diffusion_rain: h, max(|dXi|) = ', h, maxval(abs(adv_diff_state% dXi))
+         ! if (debug) write(*,*) 'do_advection_diffusion_rain: h, max(|dXi|) = ', h, maxval(abs(adv_diff_state% dXi))
 
          ! dXi_max = maxval(s% xa(i_Xi, 1:s% nz) - s% xa_old(i_Xi, 1:s% nz))
          ! if (dXi_max >= dXi_max_crit) then ! 2-5d-8
@@ -338,7 +332,7 @@ contains
       scaling_factor = min(max_scaling_factor, min_scaling_factor)
 
       if (scaling_factor < 1d0) then
-         if (debug_advection_diffusion_solver) then
+         if (debug) then
             write(*,*) 'limit_dXi_to_physical_range: applying scaling factor = ', scaling_factor
             write(*,*) achar(9), 'max_scaling_factor: ', max_scaling_factor
             write(*,*) achar(9), 'min_scaling_factor: ', min_scaling_factor
@@ -496,7 +490,7 @@ contains
       if (ierr /= 0) return
 
       if (.not. precipitated .and. all(is_miscible)) then
-         if (debug_advection_diffusion_solver) write(*,*) 'init_advection_diffusion_state: all regions are miscible, skipping advection-diffusion step'
+         if (debug) write(*,*) 'init_advection_diffusion_state: all regions are miscible, skipping advection-diffusion step'
          return
       end if
 
@@ -516,7 +510,7 @@ contains
          return
       end if
 
-      if (debug_advection_diffusion_solver) then
+      if (debug) then
          write(*,*) 'init_advection_diffusion_state: advection-diffusion state initialized'
          write(*,*) 'init_advection_diffusion_state: nz = ', adv_diff_state % nz
          write(*,*) 'init_advection_diffusion_state: dt = ', adv_diff_state % dt
@@ -631,7 +625,7 @@ contains
       adv_diff_state% tau_conv = tau_diff(L, D)  ! diffusion timescale
       adv_diff_state% tau_settle = tau_adv(L, v)  ! advection timescale
 
-      if (debug_advection_diffusion_solver) then
+      if (debug) then
          tau_adv_div_tau_diff = adv_diff_state% tau_settle/adv_diff_state% tau_conv
          write(*,*) ''
          write(*,*) 'get_time_step: tau_adv = ', adv_diff_state% tau_settle
@@ -709,7 +703,7 @@ contains
       adv_diff_state % nz = 0
       adv_diff_state % dt = 0d0
 
-      if (debug_advection_diffusion_solver) then
+      if (debug) then
          write(*,*) 'free_advection_diffusion_state: advection-diffusion state freed'
       end if
 
@@ -730,7 +724,7 @@ contains
          relative_difference_from_zero = abs(mass_increase + mass_decrease) / typical_scale
       end if
 
-      if (debug_advection_diffusion_solver) then
+      if (debug) then
          write(*,*) 'relative_difference_from_zero: mass_increase = ', mass_increase, ' mass_decrease = ', mass_decrease, ' relative difference = ', relative_difference_from_zero
       end if
 
@@ -826,7 +820,7 @@ contains
       ! Neumann BC at r=L: gradient = 0, so dXi(nz) = dXi(nz-1)
       adv_diff_state% dXi(nz) = adv_diff_state% dXi(nz-1)
 
-      if ( debug_backward_Euler ) then
+      if ( debug ) then
          write(*,'(a16,a16,a16,a16)') 'k','f_n(k)', 'f_np1(k)', 'dXi(k)'
          do k = 1, nz-2
             write(*,'(i12,99(1pd26.16))') k+1, f_n(k), f_np1(k), adv_diff_state% dXi(k+1)
@@ -866,7 +860,7 @@ contains
 
       do k_update = s% nz, 1, -1
 
-         if ( debug_bottom_up_rain ) write(*,*) 'do_bottom_up_rain: k_update: ', k_update
+         if ( debug ) write(*,*) 'do_bottom_up_rain: k_update: ', k_update
 
          call get_dXi(s, k_update, s% nz, dXi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
          if (ierr /= 0) then
@@ -880,7 +874,7 @@ contains
             cycle
          end if
 
-         if (debug_bottom_up_rain) then
+         if (debug) then
             k_debug = maxloc(abs(dXi), dim=1)
             write(*,*) 'do_bottom_up_rain: k_update, k_max, dXi_max = ', k_update, k_debug, dXi(k_debug)
          end if
@@ -960,6 +954,7 @@ contains
       xa_pre = s%xa
 
       ! 2. Compute the global equilibrium mass fraction changes
+      if (debug) write(*,*) 'do_instant_rain: calling get_dXi'
       call get_dXi(s, 1, s%nz, dXi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       if (ierr /= 0) then
          write(*,*) 'do_instant_rain: error in get_dXi'
@@ -967,19 +962,22 @@ contains
       end if
 
       if (.not. allocated(dXi)) then
-         if (verbose) write(*,1) 'do_instant_rain: no precipitating region found.'
+         if (debug) write(*,1) 'do_instant_rain: no precipitating region found.'
          return ! And here!
       end if
 
       ! 3. Apply changes to s%xa and re-normalize other species
+      if (debug) write(*,*) 'do_instant_rain: calling adjust_mass_fractions'
       call adjust_mass_fractions(s, dXi(1:s% nz), ierr)
       if (ierr /= 0) return
 
       ! 4. Adjust s% D_mix so MESA doesn't immediately undo our work
+      if (debug) write(*,*) 'do_instant_rain: calling adjust_mixing_in_sedimenting_region'
       call adjust_mixing_in_sedimenting_region(s, is_miscible, ierr)
       if (ierr /= 0) return
 
       ! 5. Verification block
+      if (debug) write(*,*) 'do_instant_rain: calling check_after_rain'
       call check_after_rain(s, 1, s% nz, xa_pre, ierr)
 
    end subroutine do_instant_rain
@@ -1095,7 +1093,10 @@ contains
          deallocate(yi)
       end do
       !$OMP END PARALLEL DO
-      if (ierr /= 0) return
+      if (ierr /= 0) then
+         write(*,*) 'get_raw_miscibility: error in parallel loop'
+         return
+      end if
 
    end subroutine get_raw_miscibility
 
@@ -1107,6 +1108,10 @@ contains
       real(kind=dp), allocatable, intent(out)  :: Xi_miscible_min(:), Xi_miscible_max(:)
       integer, intent(out) :: ierr
 
+      ! debugging
+      integer :: k_debug
+
+      if (debug) write(*,*) 'get_dXi: calling get_raw_miscibility'
       call get_raw_miscibility(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, ierr)
       if (ierr /= 0) then
          write(*,*) 'get_precipitating_bounds: error in get_raw_miscibility'
@@ -1115,11 +1120,23 @@ contains
 
       ! if is_miscible is .true. everywhere, we don't need to do anything
       if (count(.not. is_miscible) < s% element_sedimentation_cell_threshold_for_precipitation) then
+         if (verbose) write(*,*) 'get_dXi: no precipitating region found, returning.'
          deallocate(Xi_miscible_min, Xi_miscible_max, is_miscible)
          return
       end if
 
+      if (debug) then
+         if (all(is_miscible)) then
+            write(*,*) "get_dXi: all cells are miscible. This shouldn't have happened."
+            ierr = 1
+            return
+         else
+            write(*,*) "get_dXi: cells that are "
+            write(*,*) "immiscible: ", pack([(k_debug, k_debug=1, s% nz)], .not. is_miscible)
+         endif
+      endif
       ! get the difference between the miscible and the actual element mass fraction in the precipitating region
+      if (debug) write(*,*) 'get_dXi: calling set_dXi'
       call set_dXi(s, is_miscible, Xi_miscible_min, Xi_miscible_max, klo, khi, dXi, ierr)
 
       if (ierr /= 0) then
@@ -1127,11 +1144,14 @@ contains
          return
       end if
 
+      if (debug) write(*,*) 'get_dXi: calling mass conservation.'
       if (.not. is_mass_conserved(dXi(klo:khi), s% dm(klo:khi))) then
          write(*,*) 'get_dXi: mass is not conserved after set_dXi. Triggering timestep retry.'
          ierr = 1
          return
       end if
+
+      if (debug) write(*,*) 'get_dXi: finished.'
 
    end subroutine get_dXi
 
@@ -1196,118 +1216,155 @@ contains
       ierr = 0 ! 0 means AOK
 
       allocate(Xi_temp(klo:khi), source=s% xa(i_Xi, klo:khi))
-
-      call init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_deposite, k_core, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+      call init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_deposite, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
       if (ierr /= 0) then
          write(*,*) 'set_dXi: error in init_set_dXi'
          return
       end if
 
-      ! TODO: Check the core logic again.
-      ! I am unsure I need all of this code below. 
-      ! In cases where there is a high-Z core, this logic seems irrelevant.
-      ! I need to think through it at think through an example again.  
-      has_core = .false.
-      if (debug) write(*,*) 'set_dXi: (k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)): '
-      do k = k_RCB, khi
+      ! check if Xi_miscible_min_monotonic and Xi_miscible_max_monotonic are allocated
+      if (.not. allocated(Xi_miscible_min_monotonic) .or. .not. allocated(Xi_miscible_max_monotonic)) then
+         write(*,*) 'set_dXi: error, monotonic miscibility limits not allocated'
+         ierr = 1
+         return
+      end if
 
-         if (debug) write(*,'(i12,l5,99(1pd26.16))') &
-            k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)
+      ! TODO: Think of where to include this.
+      ! If klo = 1 and khi = s% nz (i.e., the entire model range), we set the boundaries to zero.
+      ! There is no flux outside of the planet.
+      ! if (klo == 1) then
+      !    Xi_miscible_min_monotonic(klo) = -1d0
+      !    Xi_miscible_max_monotonic(klo) = -1d0
+      !    is_miscible(klo) = .true.
+      ! end if
 
-         if (should_exit_loop(k, k_core, k_rain, has_core)) exit
+      ! if (khi == s% nz) then
+      !    Xi_miscible_min_monotonic(khi) = -1d0
+      !    Xi_miscible_max_monotonic(khi) = -1d0
+      !    is_miscible(khi) = .true.
+      ! end if
 
-         it_rains = (Xi_temp(k) > Xi_miscible_min_monotonic(k)) & ! we are above the minimum mixture
-            .and. (Xi_miscible_min_monotonic(k) >= 0d0)  ! the miscible limit is not -1
-         !.and. (Xi_temp(k) < Xi_miscible_max_monotonic(k) .or. Xi_miscible_max_monotonic(k) <= 0d0) & ! we are below the maximum mixture
-
-         if (it_rains) then
-            if (debug_set_dXi) write(*,*) 'set_dXi: raining at k = ', k
-
-            if (k + 1 == k_core) then
-               ! we are one cell above the core and still immiscible.
-               ! the only way forward is to saturate the core
-               call transfer_Xi(s, Xi_temp, Xi_miscible_max_monotonic, k, k_rain+1, k-1, ierr)
-               if (ierr /= 0) then
-                  write(*,*) 'set_dXi: error in transfer_Xi for edge case k + 1 == k_core'
-                  return
-               end if
-               exit
-            end if
-            
-            ! TODO: This is from Gemini. Check that it makes sense.
-            if (k >= k_deposite) then
-               if (verbose) write(*,*) 'set_dXi: reached deposition floor at k = ', k
-               ! Check if this accumulation triggers core logic before exiting
-               if (any((Xi_temp(k+1:k_core-1) > Xi_miscible_max_monotonic(k+1:k_core-1)) .and. (Xi_miscible_max_monotonic(k+1:k_core-1) >= 0d0))) then
-                  has_core = .true.
-                  call saturate_core(s, k, klo, khi, k_RCB, k_rain, k_core, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_temp, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
-                  if (ierr /= 0) return
-               end if
-               exit
-            end if
-
-
-            ! if the mass fraction is in the immiscible region, transfer it to the deposite below
-            call transfer_Xi(s, Xi_temp, Xi_miscible_min_monotonic, k, k+1, k_deposite, ierr)
-            if (ierr /= 0) then
-               write(*,*) 'set_dXi: error in transfer_Xi for rain condition'
-               return
-            end if
-
-            ! make sure that after the transfer, none of the mass fractions are greater than the miscible maximum
-            if (any((Xi_temp(k+1:k_core-1) > Xi_miscible_max_monotonic(k+1:k_core-1)) .and. (Xi_miscible_max_monotonic(k+1:k_core-1) >= 0d0))) then
-               has_core = .true.
-               call saturate_core(s, k, klo, khi, k_RCB, k_rain, k_core, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_temp, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
-               if (ierr /= 0) return
-            end if
-
+      ! very basic logic
+      if (debug) write(*,*) 'set_dXi: transfer Xi'
+      if (debug) write(*,*) 'k_RCB, k_rain, k_deposite: ', k_RCB, k_rain, k_deposite
+      do k = k_RCB, k_rain
+         if (debug) write(*,*) 'set_dXi: transferring Xi at k = ', k
+         call transfer_Xi(s, Xi_temp, Xi_miscible_min_monotonic, k, k_rain+1, k_deposite, ierr)
+         if (ierr /= 0) then
+            write(*,*) 'set_dXi: error in transfer_Xi for basic logic'
+            return
          end if
       end do
 
-      ! if there is a core, we homogenize the mass fraction one last time
-      if (has_core) then
-         if (debug_set_dXi) write(*,*) 'set_dXi: homogenizing region (k_rain+1, k_core-1): ', k_rain+1, k_core-1
-         call homogenize_region(s, Xi_temp, k_rain+1, k_core-1, ierr)
-         if ( ierr /= 0 ) return
+      if (debug) write(*,*) 'set_dXi: basic transfer complete.'
 
-         if (debug_set_dXi) then
-            call check_abundance_array(Xi_temp, k_rain+1, khi, .true., monotonic_increase, ierr)
-            if (ierr /= 0) then
-               write(*,*) 'set_dXi: error in check_abundance_array after homogenization of the core'
-               call mesa_error(__FILE__,__LINE__)
-            end if
-         end if
-      end if
+      ! TODO: Check the core logic again.
+      
+      ! I am unsure I need all of this code below. 
+      ! In cases where there is a high-Z core, this logic seems irrelevant.
+      ! I need to think through it at think through an example again.  
+      ! has_core = .false.
+      ! k_core = khi+1
+      ! if (debug) write(*,*) 'set_dXi: (k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)): '
+      ! do k = k_RCB, khi
 
-      ! homogenize convective envelope
-      if (.true.) then
-         call homogenize_convective_envelope(s, is_miscible, Xi_miscible_min, Xi_miscible_max, klo, khi, Xi_temp, ierr)
-         if (ierr /= 0) then
-            write(*,*) 'set_dXi: error in homogenize_convective_envelope'
-            return
-         end if
-      end if
+      !    if (debug) write(*,'(i12,l5,99(1pd26.16))') &
+      !       k, is_miscible(k), Xi_temp(k), Xi_miscible_min_monotonic(k), Xi_miscible_max_monotonic(k)
+
+      !    if (should_exit_loop(k, k_core, k_rain, has_core)) exit
+
+      !    it_rains = (Xi_temp(k) > Xi_miscible_min_monotonic(k)) & ! we are above the minimum mixture
+      !       .and. (Xi_miscible_min_monotonic(k) >= 0d0)  ! the miscible limit is not -1
+      !    !.and. (Xi_temp(k) < Xi_miscible_max_monotonic(k) .or. Xi_miscible_max_monotonic(k) <= 0d0) & ! we are below the maximum mixture
+
+      !    if (it_rains) then
+      !       if (debug) write(*,*) 'set_dXi: raining at k = ', k
+
+      !       if (k + 1 == k_core) then
+      !          ! we are one cell above the core and still immiscible.
+      !          ! the only way forward is to saturate the core
+      !          call transfer_Xi(s, Xi_temp, Xi_miscible_max_monotonic, k, k_rain+1, k-1, ierr)
+      !          if (ierr /= 0) then
+      !             write(*,*) 'set_dXi: error in transfer_Xi for edge case k + 1 == k_core'
+      !             return
+      !          end if
+      !          exit
+      !       end if
+            
+      !       ! TODO: This is from Gemini. Check that it makes sense.
+      !       if (k >= k_deposite) then
+      !          if (verbose) write(*,*) 'set_dXi: reached deposition floor at k = ', k
+      !          ! Check if this accumulation triggers core logic before exiting
+      !          if (any((Xi_temp(k+1:k_core-1) > Xi_miscible_max_monotonic(k+1:k_core-1)) .and. (Xi_miscible_max_monotonic(k+1:k_core-1) >= 0d0))) then
+      !             has_core = .true.
+      !             call saturate_core(s, k, klo, khi, k_RCB, k_rain, k_core, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_temp, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+      !             if (ierr /= 0) return
+      !          end if
+      !          exit
+      !       end if
+
+
+      !       ! if the mass fraction is in the immiscible region, transfer it to the deposite below
+      !       call transfer_Xi(s, Xi_temp, Xi_miscible_min_monotonic, k, k+1, k_deposite, ierr)
+      !       if (ierr /= 0) then
+      !          write(*,*) 'set_dXi: error in transfer_Xi for rain condition'
+      !          return
+      !       end if
+
+      !       ! make sure that after the transfer, none of the mass fractions are greater than the miscible maximum
+      !       if (any((Xi_temp(k+1:k_core-1) > Xi_miscible_max_monotonic(k+1:k_core-1)) .and. (Xi_miscible_max_monotonic(k+1:k_core-1) >= 0d0))) then
+      !          has_core = .true.
+      !          call saturate_core(s, k, klo, khi, k_RCB, k_rain, k_core, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_temp, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+      !          if (ierr /= 0) return
+      !       end if
+
+      !    end if
+      ! end do
+
+      ! ! if there is a core, we homogenize the mass fraction one last time
+      ! if (has_core) then
+      !    if (debug) write(*,*) 'set_dXi: homogenizing region (k_rain+1, k_core-1): ', k_rain+1, k_core-1
+      !    call homogenize_region(s, Xi_temp, k_rain+1, k_core-1, ierr)
+      !    if ( ierr /= 0 ) return
+
+      !    if (debug) then
+      !       call check_abundance_array(Xi_temp, k_rain+1, khi, .true., monotonic_increase, ierr)
+      !       if (ierr /= 0) then
+      !          write(*,*) 'set_dXi: error in check_abundance_array after homogenization of the core'
+      !          call mesa_error(__FILE__,__LINE__)
+      !       end if
+      !    end if
+      ! end if
+
+      ! ! homogenize convective envelope
+      ! if (.false.) then
+      !    call homogenize_convective_envelope(s, is_miscible, Xi_miscible_min, Xi_miscible_max, klo, khi, Xi_temp, ierr)
+      !    if (ierr /= 0) then
+      !       write(*,*) 'set_dXi: error in homogenize_convective_envelope'
+      !       return
+      !    end if
+      ! end if
 
       ! now, we compute the difference between the miscible and the actual element mass fraction in the region klo:khi
       if (allocated(dXi)) deallocate(dXi)
       allocate(dXi(klo:khi), source = 0d0)
       dXi(klo:khi) = Xi_temp(klo:khi) - s% xa(i_Xi, klo:khi)
 
-      ! if ( debug ) then
-      !    write(*,*) ''
-      !    write(*,*) 'After set_dXi:'
-      !    write(*,*) 'klo, khi: ', klo, khi
-      !    write(*,*) 'k, is_miscible, mixing_type, Xi, Xi_temp, dXi, Xi_miscible_min, Xi_miscible_min_monotonic, Xi_miscible_max, Xi_miscible_max_monotonic:'
-      !    do k = klo, khi
-      !       write(*,'(i12,l5,i12,99(1pd26.16))') k, is_miscible(k), s% mixing_type(k), s% xa(i_Xi, k), Xi_temp(k), dXi(k), &
-      !          Xi_miscible_min(k), Xi_miscible_min_monotonic(k), Xi_miscible_max(k), Xi_miscible_max_monotonic(k)
-      !    end do
-      !    write(*,*) ''
-      ! end if
+      if ( debug ) then
+         write(*,*) ''
+         write(*,*) 'After set_dXi:'
+         write(*,*) 'klo, khi: ', klo, khi
+         write(*,*) 'k, is_miscible, mixing_type, Xi, Xi_temp, dXi, Xi_miscible_min, Xi_miscible_min_monotonic, Xi_miscible_max, Xi_miscible_max_monotonic:'
+         do k = klo, khi
+            write(*,'(i12,l5,i12,99(1pd26.16))') k, is_miscible(k), s% mixing_type(k), s% xa(i_Xi, k), Xi_temp(k), dXi(k), &
+               Xi_miscible_min(k), Xi_miscible_min_monotonic(k), Xi_miscible_max(k), Xi_miscible_max_monotonic(k)
+         end do
+         write(*,*) ''
+      end if
 
-      ! deallocate(Xi_temp)
-      ! deallocate(Xi_miscible_min_monotonic)
-      ! deallocate(Xi_miscible_max_monotonic)
+      deallocate(Xi_temp)
+      deallocate(Xi_miscible_min_monotonic)
+      deallocate(Xi_miscible_max_monotonic)
 
    end subroutine set_dXi
 
@@ -1331,11 +1388,11 @@ contains
 
       do k = k_RCB+1, khi
          if (is_at_miscibility_edge(Xi(k), is_miscible(k), Xi_miscible_min(k), Xi_miscible_max(k))) then
-            if (debug_set_dXi) write(*,*) 'set_dXi: homogenizing region (k_RCB, k): ', k_RCB, k-1
+            if (debug) write(*,*) 'set_dXi: homogenizing region (k_RCB, k): ', k_RCB, k-1
             call homogenize_region(s, Xi, k_RCB, k-1, ierr)
             if (ierr /= 0) return
 
-            if (debug_set_dXi) then
+            if (debug) then
                call check_abundance_array(Xi, k_RCB, khi, .true., monotonic_increase, ierr)
                if (ierr /= 0) then
                   write(*,*) 'set_dXi: error in check_abundance_array after homogenization'
@@ -1369,7 +1426,7 @@ contains
       ierr = 0 ! 0 means AOK
       k_core_old = k_core
 
-      if (debug_set_dXi) write(*,*) 'saturate_core: k_rain, k+1, k_core_old', k_rain, k+1, k_core_old
+      if (debug) write(*,*) 'saturate_core: k_rain, k+1, k_core_old', k_rain, k+1, k_core_old
       do j = k_core_old-1, k+1, -1
          if (Xi(j) > Xi_miscible_max_monotonic(j) .and. Xi_miscible_max_monotonic(j) >= 0d0) then
             k_core = j
@@ -1389,12 +1446,12 @@ contains
             end if
          else
 
-            if (debug_set_dXi) write(*,*) 'exit core: k_core', k_core
+            if (debug) write(*,*) 'exit core: k_core', k_core
 
             if (k_rain + 1 == j) then
                call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, k_rain - 1, k_rain, ierr)
                if ( ierr /= 0 ) return
-               if (debug_set_dXi) write(*,*) 'set_dXi: k_rain adjusted to ', k_rain, ' because k_rain == j = ', j
+               if (debug) write(*,*) 'set_dXi: k_rain adjusted to ', k_rain, ' because k_rain == j = ', j
             end if
 
             call adjust_miscibility_gap(s, klo, khi, k_RCB, k_core-1, is_miscible, Xi_miscible_min, Xi_miscible_max, &
@@ -1456,7 +1513,7 @@ contains
       logical :: check_range = .false.
       ierr = 0 ! 0 means AOK
 
-      if (debug_set_dXi) write(*,*) 'enforce_monotonicity: size(Xi), klo, khi, method: ', size(Xi), klo, khi, method
+      if (debug) write(*,*) 'enforce_monotonicity: size(Xi), klo, khi, method: ', size(Xi), klo, khi, method
 
       ! TODO: Optimize by finding the minimum/maximum value
       if (method == enforce_monotonicity_bottom_up) then
@@ -1572,14 +1629,14 @@ contains
       call enforce_monotonicity(Xi_miscible_min_monotonic, k_start, k_end, enforce_monotonicity_bottom_up, ierr)
       if (ierr /= 0) return
 
-      call debugging_abundance_array_check(debug_set_dXi,&
+      call debugging_abundance_array_check(debug,&
          'adjust_miscibility_gap: error in check_abundance_array after enforce_monotonicity (min)', &
          Xi_miscible_min_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_min_monotonic /= -1d0)
 
       call enforce_monotonicity(Xi_miscible_max_monotonic, k_start, k_end, enforce_monotonicity_top_down, ierr)
       if (ierr /= 0) return
 
-      call debugging_abundance_array_check(debug_set_dXi,&
+      call debugging_abundance_array_check(debug,&
          'adjust_miscibility_gap: error in check_abundance_array after damping Xi (max)', &
          Xi_miscible_max_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_max_monotonic /= -1d0)
 
@@ -1587,11 +1644,11 @@ contains
          call reduce_Xi_difference(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, klo, khi, ierr)
          if (ierr /= 0) return
 
-         call debugging_abundance_array_check(debug_set_dXi,&
+         call debugging_abundance_array_check(debug,&
             'adjust_miscibility_gap: error in check_abundance_array after damping Xi (min)', &
             Xi_miscible_min_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_min_monotonic /= -1d0)
 
-         call debugging_abundance_array_check(debug_set_dXi,&
+         call debugging_abundance_array_check(debug,&
             'adjust_miscibility_gap: error in check_abundance_array after damping Xi (max)', &
             Xi_miscible_max_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_max_monotonic /= -1d0)
 
@@ -1631,15 +1688,15 @@ contains
 
       ! we reached the core. Nothing more to do.
       if (k == k_core) then
-         if (debug_set_dXi) write(*,*) 'set_dXi: k_core reached, exiting loop'
+         if (debug) write(*,*) 'set_dXi: k_core reached, exiting loop'
          should_exit_loop = .true.
       elseif (.not. has_core .and. k > k_rain) then
-         if (debug_set_dXi) write(*,*) 'set_dXi: no core and k > k_rain, exiting loop'
+         if (debug) write(*,*) 'set_dXi: no core and k > k_rain, exiting loop'
          should_exit_loop = .true.
       end if
    end function
 
-   subroutine init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_deposite, k_core, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+   subroutine init_set_dXi(s, klo, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, k_RCB, k_rain, k_deposite, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
       ! initializes the parameters for set_dXi
       type (star_info), pointer :: s
       integer, intent(in) :: klo, khi  ! region in which we transfer the element
@@ -1649,7 +1706,6 @@ contains
       integer, intent(out) :: k_RCB       ! index of the radiative-convective boundary
       integer, intent(out) :: k_rain      ! index of the rain threshold
       integer, intent(out) :: k_deposite  ! index of the deposition threshold
-      integer, intent(out) :: k_core      ! index of the core
       real(kind=dp), allocatable, intent(inout) :: Xi_miscible_min_monotonic(:)  ! miscible element mass fraction, monotonically increasing
       real(kind=dp), allocatable, intent(inout) :: Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically decreasing
       integer, intent(out) :: ierr  ! error code
@@ -1657,7 +1713,14 @@ contains
       call find_RCB(s, klo, khi, k_RCB, ierr)
       if (ierr/=0) return
 
-      call adjust_miscibility_gap(s, klo, khi, k_RCB, khi, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
+
+      call find_k_deposite(s, klo, khi, k_RCB, k_deposite, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'set_dXi: error in find_k_deposite'
+         return
+      end if
+
+      call adjust_miscibility_gap(s, klo, khi, k_RCB, k_deposite, is_miscible, Xi_miscible_min, Xi_miscible_max, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, ierr)
       if (ierr /= 0) then
          write(*,*) 'init_set_dXi: error in adjust_miscibility_gap'
          return
@@ -1669,13 +1732,14 @@ contains
          return
       end if
 
-      call find_k_deposite(s, klo, khi, k_rain, k_deposite, ierr)
-      if (ierr /= 0) then
-         write(*,*) 'set_dXi: error in find_k_deposite'
-         return
+      if (verbose) then
+         write(*,'(a32)') 'init_set_dXi: finished'
+         write(*,'(a32,i12)') 'klo', klo
+         write(*,'(a32,i12)') 'khi', khi
+         write(*,'(a32,i12)') 'k_RCB', k_RCB
+         write(*,'(a32,i12)') 'k_rain', k_rain
+         write(*,'(a32,i12)') 'k_deposite', k_deposite
       end if
-
-      k_core = khi+1
 
    end subroutine init_set_dXi
 
@@ -1705,12 +1769,15 @@ contains
 
 
       ! first, compute the difference between the reference and the current element mass fraction
+      if (debug) write(*,*) 'transfer_Xi: define dXi'
       dXi = Xi_ref(k) - Xi(k)
 
       ! next, adjust the element mass fraction in cell k
+      if (debug) write(*,*) 'transfer_Xi: set Xi(k)'
       Xi(k) = Xi_ref(k)
 
       ! Now, we transfer the difference to the region klo:khi
+      if (debug) write(*,*) 'transfer_Xi: compute dM_Xi and M'
       dM_Xi = s% dm(k) * dXi     ! mass of the element that is transferred
       M = sum(s% dm(klo:khi))    ! total mass in the region klo:khi
 
@@ -1724,7 +1791,19 @@ contains
       end if
 
       ! now, we adjust the element mass fraction in the region klo:khi
+      if (debug) write(*,*) 'transfer_Xi: adjust Xi(klo:khi)'
       Xi(klo:khi) = Xi(klo:khi) - dM_Xi / M
+
+      ! check that for all Xi elements 0 <= Xi <= 1
+      if (any(Xi(klo:khi) < 0d0) .or. any(Xi(klo:khi) > 1d0)) then
+         ierr = 1
+         write(*,*) 'transfer_Xi: element mass fraction out of bounds after transfer'
+         write(*,*) 'klo, khi: ', klo, khi
+         write(*,*) 'Xi(klo:khi): ', Xi(klo:khi)
+         return
+      end if
+
+      if (debug) write(*,*) 'transfer_Xi: finished.'
 
    end subroutine transfer_Xi
 
@@ -1759,7 +1838,7 @@ contains
          return
       end if
 
-      if ( debug_set_dXi ) then
+      if ( debug ) then
          if (k_RCB > 0) then
             write(*,*) 'find_RCB: found RCB at k: ', k_RCB
          end if
@@ -1775,13 +1854,20 @@ contains
       integer, intent(out) :: k_deposite  ! index of the deposition region
       integer, intent(out) :: ierr  ! error code
 
+      ! defining a minimum mass that the deposition region must be separated from the rain region.
+      real(kind=dp) :: mass_separation_to_k_rain
+      real(kind=dp), parameter :: mass_separation_to_k_rain_threshold = 0.01d0  ! threshold for the mass separation to k_rain to consider that we are in the deposition region. This is a tunable parameter that can be adjusted based on the desired sensitivity to the mass separation. A smaller value will result in a more sensitive detection of the deposition region, while a larger value will require a more significant mass separation to identify the deposition region.
+
       ! local variables
       integer :: k
 
       ierr = 0 ! 0 means AOK
       k_deposite = -1  ! initialize to -1, meaning that we haven't found the deposition region yet
+      
+      mass_separation_to_k_rain = 0d0
       do k = k_rain + 2, khi
-         if ( s% mixing_type(k) == no_mixing) then
+         mass_separation_to_k_rain = sum(s% dm(k_rain+1:k-1)) / s% mstar  ! compute the mass separation to k_rain
+         if ( s% mixing_type(k) == no_mixing .and. mass_separation_to_k_rain > mass_separation_to_k_rain_threshold) then
             k_deposite = k - 1  ! we found the deposition region
             exit
          end if
@@ -1799,13 +1885,13 @@ contains
          return
       end if
 
-      if ( debug_set_dXi ) then
+      if ( debug ) then
          if (k_deposite > 0) then
             write(*,*) 'find_k_deposite: found deposition region at k: ', k_deposite
          end if
       end if
 
-      if (.true.) then
+      if (debug) then
          write(*,*) 'find_k_deposite: found k_deposite: ', k_deposite
          write(*,*) 'klo, k_rain, khi: ', klo, k_rain, khi
       end if
@@ -1828,6 +1914,16 @@ contains
       logical :: inside_core, is_cell_saturated
       ierr = 0 ! 0 means AOK
 
+      
+      ! check that there is at least one cell that is immsicible:
+      if (all(is_miscible(klo:khi))) then
+         ierr = 1
+         write(*,*) 'find_k_rain: model is miscible everywhere in the region klo:khi'
+         write(*,*) '   No k_rain can be found.'
+         write(*,*) '   klo, khi: ', klo, khi
+         return
+      end if
+
       ! if there is no k_core, we have to start from the bottom
       ! first, we need to find out if we are inside the core
 
@@ -1839,7 +1935,7 @@ contains
             inside_core = .false.  ! we are now outside the core
          else if (.not. is_miscible(k) .and. .not. inside_core) then
             k_rain = k  ! we found the last index where the model is immiscible outside the core
-            if (.true.) then
+            if (debug) then
                write(*,*) 'find_k_rain: found k_rain: ', k_rain
                write(*,*) 'klo, khi: ', klo, khi
             end if
@@ -1851,7 +1947,7 @@ contains
 
       k_rain = klo-1  ! set k_rain to klo-1, meaning that there is no immiscible region outside the core
 
-      if (debug_set_dXi) then
+      if (debug) then
          write(*,*) 'find_k_rain: model is miscible everywhere outside the core'
          write(*,*) 'klo, khi: ', klo, khi
          write(*,*) 'k_rain set to: ', k_rain
@@ -2236,7 +2332,7 @@ contains
       pd%num_Ts_at_unique_Ps(:pd%num_unique_Ps-1) = pd%unique_P_index(2:) - pd%unique_P_index(:pd%num_unique_Ps-1)
       pd%num_Ts_at_unique_Ps(pd%num_unique_Ps) = pd%n_points - pd%unique_P_index(pd%num_unique_Ps) + 1
 
-      if ( debug_phase_diagram ) then
+      if ( debug ) then
          write(*,11) 'unique_Ps_and_Ts: num_Ps = ', pd%num_unique_Ps
          write(*,11) 'unique_Ps_and_Ts: unique_P_index = ', pd%unique_P_index
          write(*,1)  'unique_Ps_and_Ts: unique_P = ', pd%unique_P
@@ -2328,7 +2424,7 @@ contains
 
       ! if we are outside the phase diagram, everything is miscible by default
       if (outside_bounds) then
-         if ( debug_phase_diagram ) write(*,*) 'immiscible_yi_fraction_interpolation: P0 is outside the phase diagram. P0 = ', P0
+         if ( debug ) write(*,*) 'immiscible_yi_fraction_interpolation: P0 is outside the phase diagram. P0 = ', P0
          return
       end if
 
@@ -2369,7 +2465,7 @@ contains
 
       ! if T0 below the temperature range, return -1d0
       if (T0 < T_lo(1) .or. T0 < T_hi(1)) then
-         if ( debug_phase_diagram ) write(*,*) 'immiscible_yi_fraction_interpolation: T0 below the data range T0 = ', T0
+         if ( debug ) write(*,*) 'immiscible_yi_fraction_interpolation: T0 below the data range T0 = ', T0
          deallocate(T_lo, T_hi, yi_min_lo, yi_min_hi, yi_max_lo, yi_max_hi)
          return
       end if
@@ -2479,7 +2575,7 @@ contains
          end if
       end if
 
-      if ( debug_phase_diagram ) then
+      if ( debug ) then
          write(*,*) '----'
          write(*,*) 'immiscible_yi_fraction_interpolation: P0(Mbar) = ', P0/1d12
          write(*,*) 'immiscible_yi_fraction_interpolation: T0 = ', T0
@@ -2547,54 +2643,95 @@ contains
       type (star_info), pointer :: s
       real(kind=dp), intent(in) :: dXi(:)
       integer, intent(out) :: ierr
-      integer :: i, n_species
-      real(kind=dp), allocatable :: f(:)
+      integer :: k, n_species, step, max_steps, steps_needed
       real(kind=dp), allocatable :: dX_array(:,:)
+      real(kind=dp), allocatable :: F_He_total(:)
+      real(kind=dp), allocatable :: F_He_sub(:)
+      real(kind=dp), allocatable :: F_j(:,:)
+      real(kind=dp) :: upwind_factor, donor_mass
+      real(kind=dp), allocatable :: dXi_sub(:)
 
-      ! debugging
-      logical :: was_not_conserved
+      ierr = 0
 
-      ierr = 0 ! 0 means AOK
-
-      ! 1. IMMER ZUERST DIE MATRIX-SCHEIDUNG UND GRÖSSENKONTROLLE
       n_species = size(s%xa, 1)
 
-      if (size(dXi) /= s% nz) then
+      if (size(dXi) /= s%nz) then
          write(*,*) 'adjust_mass_fractions: dXi is not the same size as s%xa'
          ierr = 1
          return
       end if
 
-      ! Check if the integral over dXi is approximately zero.
-      if (.not. is_mass_conserved(dXi(1:s% nz), s% dm(1:s% nz))) then
+      if (.not. is_mass_conserved(dXi(1:s%nz), s%dm(1:s%nz))) then
          write(*,*) 'adjust_mass_fractions: mass is not conserved in dXi'
          ierr = 1
          return
       end if
 
-      ! 2. ALLOKATIONEN
-      allocate(f(1:s% nz), source=0d0)
-      allocate(dX_array(1:n_species, 1:s% nz), source=0d0)
+      allocate(dX_array(1:n_species, 1:s%nz), source=0.0_dp)
+      allocate(F_He_total(0:s%nz), source=0.0_dp)
+      allocate(F_He_sub(0:s%nz), source=0.0_dp)
+      allocate(F_j(1:n_species, 0:s%nz), source=0.0_dp)
+      allocate(dXi_sub(1:s%nz), source=0.0_dp)
 
-      ! 3. BERECHNUNG VON f UND INITIALISIERUNG DER REPRODUZIERTEN SPEZIES
-      f(1:s% nz) = -dXi(1:s% nz) / (1.0_dp - s%xa(i_Xi, 1:s% nz))
-      dX_array(i_Xi, 1:s% nz) = dXi(1:s% nz)
+      ! 1. Calculate the total net mass flux of helium across interfaces
+      F_He_total(0) = 0.0_dp
+      do k = 1, s%nz
+         F_He_total(k) = F_He_total(k-1) - (dXi(k) * s%dm(k))
+      end do
+      F_He_total(s%nz) = 0.0_dp
 
-      ! 4. MULTIPLIKATION DER ANDEREN SPEZIES (Konsequente 1:s%nz Notation)
-      if (i_Xi > 1) then
-         dX_array(1:i_Xi-1, 1:s% nz) = s%xa(1:i_Xi-1, 1:s% nz) * spread(f(1:s% nz), dim=1, ncopies=i_Xi-1)
-      end if
+      ! 2. Determine necessary sub-steps to strictly satisfy CFL condition (< 0.5)
+      max_steps = 1
+      do k = 1, s%nz-1
+         if (F_He_total(k) > 0.0_dp) then
+            donor_mass = s%dm(k+1) * (1.0_dp - s%xa(i_Xi, k+1))
+         else if (F_He_total(k) < 0.0_dp) then
+            donor_mass = s%dm(k) * (1.0_dp - s%xa(i_Xi, k))
+         else
+            donor_mass = 1.0_dp ! Arbitrary non-zero value, flux is zero
+         end if
 
-      if (i_Xi < n_species) then
-         dX_array(i_Xi+1:n_species, 1:s% nz) = s%xa(i_Xi+1:n_species, 1:s% nz) * spread(f(1:s% nz), dim=1, ncopies=n_species-i_Xi)
-      end if
-      
-      ! 5. UPDATE DER MASSENBRUCHTEILE
-      s% xa(1:n_species, 1:s% nz) = s% xa(1:n_species, 1:s% nz) + dX_array(1:n_species, 1:s% nz)
+         if (abs(F_He_total(k)) > 0.0_dp) then
+            steps_needed = ceiling(abs(F_He_total(k)) / (0.5_dp * donor_mass))
+            if (steps_needed > max_steps) max_steps = steps_needed
+         end if
+      end do
 
-      ! 7. SAUBERES DEALLOCATE FÜR ALLE FÄLLE AM ENDE
-      deallocate(f)
+      ! 3. Sub-step explicit advection to guarantee stability
+      dXi_sub = dXi / real(max_steps, dp)
+      F_He_sub = F_He_total / real(max_steps, dp)
+
+      do step = 1, max_steps
+         ! Calculate return mass fluxes using instantaneous abundances
+         do k = 1, s%nz-1
+            if (F_He_sub(k) > 0.0_dp) then
+               upwind_factor = 1.0_dp / (1.0_dp - s%xa(i_Xi, k+1))
+               F_j(:, k) = -F_He_sub(k) * s%xa(:, k+1) * upwind_factor
+            else
+               upwind_factor = 1.0_dp / (1.0_dp - s%xa(i_Xi, k))
+               F_j(:, k) = -F_He_sub(k) * s%xa(:, k) * upwind_factor
+            end if
+         end do
+         F_j(:, 0) = 0.0_dp
+         F_j(:, s%nz) = 0.0_dp
+
+         ! Compute flux divergence
+         do k = 1, s%nz
+            dX_array(1:n_species, k) = (F_j(1:n_species, k-1) - F_j(1:n_species, k)) / s%dm(k)
+         end do
+
+         ! Override helium divergence with prescribed physical change
+         dX_array(i_Xi, 1:s%nz) = dXi_sub(1:s%nz)
+
+         ! Apply the incremental update
+         s%xa(1:n_species, 1:s%nz) = s%xa(1:n_species, 1:s%nz) + dX_array(1:n_species, 1:s%nz)
+      end do
+
       deallocate(dX_array)
+      deallocate(F_He_total)
+      deallocate(F_He_sub)
+      deallocate(F_j)
+      deallocate(dXi_sub)
 
    end subroutine adjust_mass_fractions
 
@@ -2649,7 +2786,7 @@ contains
          return
       end if
 
-      if ( debug_number_fraction_scaling ) then
+      if ( debug ) then
          write(*,*) 'get_scaled_number_fractions: xa = ', xa
          write(*,*) 'get_scaled_number_fractions: yi_scaling = ', yi_scaling
          write(*,*) 'get_scaled_number_fractions: yi'
@@ -2675,7 +2812,7 @@ contains
       ierr = 0 ! 0 means AOK
 
       if (is_miscible .and. yi_miscible < 0d0) then
-         if (debug_number_fraction_scaling) write(*,*) 'from_scaled_number_fraction_to_mass_fraction: is_miscible is true, returning without changes'
+         if (debug) write(*,*) 'from_scaled_number_fraction_to_mass_fraction: is_miscible is true, returning without changes'
          Xi_miscible = -1d0  ! indicate that we are miscible
          return
       end if
@@ -2697,7 +2834,7 @@ contains
       cid = s% chem_id(i_Xi)
       Xi_miscible = yi(i_Xi) * dble(chem_isos% Z_plus_N(cid)) / mean_molecular_weight
 
-      if ( debug_number_fraction_scaling ) then
+      if ( debug ) then
          !$OMP CRITICAL
          write(*,*) 'from_scaled_number_fraction_to_mass_fraction: yi_miscible = ', yi_miscible
          write(*,*) 'from_scaled_number_fraction_to_mass_fraction: is_miscible = ', is_miscible
@@ -2840,7 +2977,7 @@ contains
       b(1) = 1d0 + alpha_half_step_up(adv_diff_state, 2) - beta_half_step_down(adv_diff_state, 2)
       b(nz-2) = 1d0 + alpha_half_step_down(adv_diff_state, nz-1) - beta_half_step_down(adv_diff_state, nz-1) + beta_half_step_up(adv_diff_state, nz-1)
 
-      if (debug_advection_diffusion_solver) then
+      if (debug) then
          write(*,*) "--------------------------------"
          write(*,'(a,i12,a,1pd26.16)') "Tridiagonal matrix setup with N = ", nz, " dt = ", adv_diff_state% dt
          write(*,*) "Tridiagonal matrix coefficients:"
@@ -3108,7 +3245,7 @@ contains
 
       ! s% D_mix(klo:khi) = 0d0  ! turn everything off for now;
 
-      if (verbose) write(*,'(a,2i12,3f26.16)') 'zone_boundaries_by_mass: klo, khi, m_max, m_min, dm = ', klo, khi, m_min/m_jupiter, m_max/m_jupiter, (m_max-m_min)/m_jupiter
+      ! if (verbose) write(*,'(a,2i12,3f26.16)') 'zone_boundaries_by_mass: klo, khi, m_max, m_min, dm = ', klo, khi, m_min/m_jupiter, m_max/m_jupiter, (m_max-m_min)/m_jupiter
 
    end subroutine adjust_mixing_in_sedimenting_region
 
