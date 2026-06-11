@@ -2543,72 +2543,58 @@ contains
 
    end subroutine yi_is_miscible
 
-   subroutine adjust_mass_fractions(s,  dXi, ierr)
+   subroutine adjust_mass_fractions(s, dXi, ierr)
       type (star_info), pointer :: s
       real(kind=dp), intent(in) :: dXi(:)
       integer, intent(out) :: ierr
-      integer :: i, k, n_species
-      real(kind=dp) :: f
-      real(kind=dp) :: xa_min, xa_max, xa_sum
+      integer :: i, n_species
+      real(kind=dp), allocatable :: f(:)
       real(kind=dp), allocatable :: dX_array(:,:)
 
       ! debugging
-      logical :: was_not_conserved = .false.
+      logical :: was_not_conserved
 
       ierr = 0 ! 0 means AOK
 
+      ! 1. IMMER ZUERST DIE MATRIX-SCHEIDUNG UND GRÖSSENKONTROLLE
       n_species = size(s%xa, 1)
 
-      allocate(dX_array(n_species, s%nz), source=0d0)
-      dX_array(i_Xi, 1:s% nz) = dXi(1:s% nz)
-
-      ! test that dXi is the same size as s%xa
       if (size(dXi) /= s% nz) then
          write(*,*) 'adjust_mass_fractions: dXi is not the same size as s%xa'
          ierr = 1
          return
       end if
 
-      !$OMP PARALLEL DO PRIVATE(i, k, f) SCHEDULE(guided)
-      do k = 1, s% nz
-
-         f = -dXi(k)/(1d0 - s% xa(i_Xi, k))
-
-         do i = 1, n_species
-            if (i == i_Xi) cycle
-            dX_array(i, k) = s% xa(i, k) * f
-
-         end do
-      end do
-      !$OMP END PARALLEL DO
-      
-      ! update the mass fractions enforcing mass conservation on the way.
-      do i = 1, n_species
-      
-         call enforce_mass_conservation(s, dX_array(i, 1:s% nz), ierr)
-         if (ierr /= 0) then
-            write(*,*) 'adjust_mass_fractions: enforce_mass_conservation failed for species ', i
-            return
-         end if
-
-         s% xa(i, 1:s% nz) = s% xa(i, 1:s% nz) + dX_array(i, 1:s% nz)
-      end do
-
-      ! check mass conservation
-      if (debug) then
-         was_not_conserved = .false.
-         do i = 1, n_species
-            write(*,*) 'adjust_mass_fractions: checking mass conservation for species ', i
-            if (.not. is_mass_conserved(dX_array(i, 1: s% nz), s% dm(1: s% nz))) then
-               was_not_conserved = .true.
-            end if
-         end do
-         deallocate(dX_array)
-
-         if (was_not_conserved) then
-            call mesa_error(__FILE__, __LINE__,'adjust_mass_fractions: mass is not conserved.')
-         end if
+      ! Check if the integral over dXi is approximately zero.
+      if (.not. is_mass_conserved(dXi(1:s% nz), s% dm(1:s% nz))) then
+         write(*,*) 'adjust_mass_fractions: mass is not conserved in dXi'
+         ierr = 1
+         return
       end if
+
+      ! 2. ALLOKATIONEN
+      allocate(f(1:s% nz), source=0d0)
+      allocate(dX_array(1:n_species, 1:s% nz), source=0d0)
+
+      ! 3. BERECHNUNG VON f UND INITIALISIERUNG DER REPRODUZIERTEN SPEZIES
+      f(1:s% nz) = -dXi(1:s% nz) / (1.0_dp - s%xa(i_Xi, 1:s% nz))
+      dX_array(i_Xi, 1:s% nz) = dXi(1:s% nz)
+
+      ! 4. MULTIPLIKATION DER ANDEREN SPEZIES (Konsequente 1:s%nz Notation)
+      if (i_Xi > 1) then
+         dX_array(1:i_Xi-1, 1:s% nz) = s%xa(1:i_Xi-1, 1:s% nz) * spread(f(1:s% nz), dim=1, ncopies=i_Xi-1)
+      end if
+
+      if (i_Xi < n_species) then
+         dX_array(i_Xi+1:n_species, 1:s% nz) = s%xa(i_Xi+1:n_species, 1:s% nz) * spread(f(1:s% nz), dim=1, ncopies=n_species-i_Xi)
+      end if
+      
+      ! 5. UPDATE DER MASSENBRUCHTEILE
+      s% xa(1:n_species, 1:s% nz) = s% xa(1:n_species, 1:s% nz) + dX_array(1:n_species, 1:s% nz)
+
+      ! 7. SAUBERES DEALLOCATE FÜR ALLE FÄLLE AM ENDE
+      deallocate(f)
+      deallocate(dX_array)
 
    end subroutine adjust_mass_fractions
 
