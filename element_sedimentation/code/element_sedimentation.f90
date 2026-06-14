@@ -34,6 +34,7 @@ module element_sedimentation
    real(kind=dp), parameter :: minimal_pressure_scale_height = 1d0   ! the minimal size below which we join precipitating regions.
 
    integer :: i_Xi = -1
+   logical :: debug_profile = .false.
    logical :: debug = .false.
    logical :: verbose = .true.
    logical :: first_call
@@ -1118,6 +1119,8 @@ contains
          return
       end if
 
+      if (debug_profile) call print_misibility_info(s, is_miscible, Xi_miscible_min, Xi_miscible_max, .false., "raw_miscibility_info.dat")
+
       ! if is_miscible is .true. everywhere, we don't need to do anything
       if (count(.not. is_miscible) < s% element_sedimentation_cell_threshold_for_precipitation) then
          if (verbose) write(*,*) 'get_dXi: no precipitating region found, returning.'
@@ -1210,6 +1213,7 @@ contains
       integer :: k_rain       ! bottom of the precipitating region
       integer :: k_deposite   ! last cell where we can deposit material from a precipitating region
       integer :: k_core       ! top of the core (oversaturated region that forms from the center out)
+      integer :: k_rain_top   ! top of the raining out region
       logical :: it_rains
       logical :: has_core  ! whether we have a core
 
@@ -1221,6 +1225,8 @@ contains
          write(*,*) 'set_dXi: error in init_set_dXi'
          return
       end if
+         
+      if (debug_profile) call print_misibility_info(s, is_miscible, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, .false., "monotonic_miscibility_info.dat")
 
       ! check if Xi_miscible_min_monotonic and Xi_miscible_max_monotonic are allocated
       if (.not. allocated(Xi_miscible_min_monotonic) .or. .not. allocated(Xi_miscible_max_monotonic)) then
@@ -1336,14 +1342,23 @@ contains
       !    end if
       ! end if
 
-      ! ! homogenize convective envelope
-      ! if (.false.) then
-      !    call homogenize_convective_envelope(s, is_miscible, Xi_miscible_min, Xi_miscible_max, klo, khi, Xi_temp, ierr)
-      !    if (ierr /= 0) then
-      !       write(*,*) 'set_dXi: error in homogenize_convective_envelope'
-      !       return
-      !    end if
-      ! end if
+      ! homogenize regions
+      if (.false.) then
+         ! homogenize deposite
+         call homogenize_region(s, Xi_temp, k_rain+1, k_deposite, ierr)
+         ! homogenize convective envelope
+         
+         ! homogenize convective envelope
+         ! find the index of the first element of is_miscible that is false
+         k_rain_top = FINDLOC(is_miscible, .FALSE., DIM=1)
+         call homogenize_region(s, Xi_temp, k_RCB, k_rain_top-1, ierr)
+         
+         ! call homogenize_convective_envelope(s, is_miscible, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, klo, khi, Xi_temp, ierr)
+         if (ierr /= 0) then
+            write(*,*) 'set_dXi: error in homogenize_convective_envelope'
+            return
+         end if
+      end if
 
       ! now, we compute the difference between the miscible and the actual element mass fraction in the region klo:khi
       if (allocated(dXi)) deallocate(dXi)
@@ -1386,9 +1401,20 @@ contains
          return
       end if
 
+      if (verbose) then
+         write(*,'(a32)') ''
+         write(*,'(a32)') 'homogenize_convective_envelope:'
+         write(*,'(a32,i12)') 'klo', klo
+         write(*,'(a32,i12)') 'khi', khi
+         write(*,'(a32,i12)') 'k_RCB', k_RCB
+      end if
+
       do k = k_RCB+1, khi
          if (is_at_miscibility_edge(Xi(k), is_miscible(k), Xi_miscible_min(k), Xi_miscible_max(k))) then
             if (debug) write(*,*) 'set_dXi: homogenizing region (k_RCB, k): ', k_RCB, k-1
+            if (verbose) write(*,'(a32,i12)') 'k_rain_top', k-1
+            if (verbose) write(*,'(a32)') ''
+            
             call homogenize_region(s, Xi, k_RCB, k-1, ierr)
             if (ierr /= 0) return
 
@@ -1487,11 +1513,14 @@ contains
          return
       end if
 
-      if ( M_Xi < 0d0 ) then
+      if (M_Xi < 0d0) then
          ierr = 1
-         write(*,*) 'homogenize_region: total mass of the element in the region klo:khi is negative'
-         write(*,*) 'klo, khi: ', klo, khi
-         write(*,*) 'M_Xi: ', M_Xi
+         write(*,'(A32)') 'homogenize_region: total mass of the element in the region klo:khi is negative'
+         write(*,'(A32,i12)') 'klo:', klo
+         write(*,'(A32,i12)') 'khi:', khi
+         write(*,'(A32,1pd26.16)') 'M_Xi: ', M_Xi
+         write(*,'(A32,1pd26.16)') 'M: ', M
+         write(*,'(A32,1pd26.16)') 'Mean X_i: ', M_Xi/M
          return
       end if
 
@@ -1518,6 +1547,7 @@ contains
       ! TODO: Optimize by finding the minimum/maximum value
       if (method == enforce_monotonicity_bottom_up) then
          do k = khi, klo+1, -1
+            ! the case for Xi = -1d0 (i.e., out of phase diagram range)
             if ( Xi(k) >= 0d0 .and. Xi(k-1) < 0d0 ) then
                Xi(k-1) = Xi(k)
             else if ( Xi(k) < 0d0 ) then
@@ -1617,6 +1647,8 @@ contains
       real(kind=dp), allocatable, intent(in) :: Xi_miscible_max(:)  ! miscible element mass fraction
       real(kind=dp), allocatable, intent(out) :: Xi_miscible_min_monotonic(:)  ! miscible element mass fraction, monotonically increasing
       real(kind=dp), allocatable, intent(out) :: Xi_miscible_max_monotonic(:)  ! miscible element mass fraction, monotonically decreasing
+
+      integer :: k  ! loop index
       integer, intent(out) :: ierr  ! error code
 
       ierr = 0 ! 0 means AOK
@@ -1639,6 +1671,18 @@ contains
       call debugging_abundance_array_check(debug,&
          'adjust_miscibility_gap: error in check_abundance_array after damping Xi (max)', &
          Xi_miscible_max_monotonic, k_start, k_end, .true., monotonic_increase, ierr, Xi_miscible_max_monotonic /= -1d0)
+
+      ! make sure we don't increase the helium abundance in the region above the precipitating region
+      ! we start (typically) from the RCB
+      do k = k_start, k_end
+         ! once we hit the precipitating region, we can exit the loop.
+         if (.not. is_miscible(k)) then
+            exit
+         else if (Xi_miscible_min_monotonic(k) > 0d0 .and. Xi_miscible_min_monotonic(k) > s% xa(i_Xi, k)) then
+            if (debug) write(*,*) 'adjust_miscibility_gap: reducing Xi_miscible_min_monotonic at k = ', k, ' from ', Xi_miscible_min_monotonic(k), ' to ', s% xa(i_Xi, k)
+            Xi_miscible_min_monotonic(k) = s% xa(i_Xi, k)
+         end if   
+      end do
 
       if (damp_sedimentation) then
          call reduce_Xi_difference(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, klo, khi, ierr)
@@ -1714,6 +1758,8 @@ contains
       if (ierr/=0) return
 
 
+      ! call k_deposite first for adjust_miscibility_gap
+      ! in this first call, we set k_rain = k_RCB to get a first guess of the deposite region
       call find_k_deposite(s, klo, khi, k_RCB, k_deposite, ierr)
       if (ierr /= 0) then
          write(*,*) 'set_dXi: error in find_k_deposite'
@@ -1729,6 +1775,13 @@ contains
       call find_k_rain(s, Xi_miscible_min_monotonic, Xi_miscible_max_monotonic, is_miscible, k_RCB, khi, k_rain, ierr)
       if (ierr /= 0) then
          write(*,*) 'set_dXi: error in find_k_rain'
+         return
+      end if
+
+      ! call k_deposite again this time with the correct k_rain for adjust_miscibility_gap
+      call find_k_deposite(s, klo, khi, k_rain, k_deposite, ierr)
+      if (ierr /= 0) then
+         write(*,*) 'set_dXi: error in find_k_deposite'
          return
       end if
 
@@ -1856,7 +1909,7 @@ contains
 
       ! defining a minimum mass that the deposition region must be separated from the rain region.
       real(kind=dp) :: mass_separation_to_k_rain
-      real(kind=dp), parameter :: mass_separation_to_k_rain_threshold = 0.01d0  ! threshold for the mass separation to k_rain to consider that we are in the deposition region. This is a tunable parameter that can be adjusted based on the desired sensitivity to the mass separation. A smaller value will result in a more sensitive detection of the deposition region, while a larger value will require a more significant mass separation to identify the deposition region.
+      real(kind=dp), parameter :: mass_separation_to_k_rain_threshold = 0.05d0  ! threshold for the mass separation to k_rain to consider that we are in the deposition region. This is a tunable parameter that can be adjusted based on the desired sensitivity to the mass separation. A smaller value will result in a more sensitive detection of the deposition region, while a larger value will require a more significant mass separation to identify the deposition region.
 
       ! local variables
       integer :: k
@@ -3384,6 +3437,49 @@ contains
 
 
    end subroutine check_phase_diagram
+
+   subroutine print_misibility_info(s, is_miscible, Xi_miscible_min, Xi_miscible_max, &
+                                 print_only_immiscible_zones, file_path)
+      type(star_info), pointer :: s
+      logical, intent(in) :: is_miscible(:)
+      real(kind=dp), intent(in) :: Xi_miscible_min(:), Xi_miscible_max(:)
+      logical, intent(in) :: print_only_immiscible_zones
+      character(len=*), intent(in), optional :: file_path
+
+      integer :: k
+      integer :: out_unit
+      logical :: write_to_file
+
+      ! Determine output destination
+      write_to_file = present(file_path)
+      
+      if (write_to_file) then
+         ! NEWUNIT automatically finds a safe, unused negative integer for the unit
+         open(newunit=out_unit, file=file_path, status='unknown', action='write')
+      else
+         ! 6 is the standard unit for terminal output (stdout) in Fortran
+         out_unit = 6
+      end if
+
+      write(out_unit,*) "Miscibility information:"
+      write(out_unit,*) "zone index, mass, X_i, miscibility, Xi_miscible_min, Xi_miscible_max, Xi_miscible_min - Xi"
+      
+      do k = 1, s% nz
+         if (.not. print_only_immiscible_zones .or. .not. is_miscible(k)) then
+            write(out_unit,'(i12, 2(1pd26.16), a12, 3(1pd26.16))') &
+               k, s% m(k), s%xa(i_Xi, k), &
+               merge("  miscible", "immiscible", is_miscible(k)), &
+               Xi_miscible_min(k), Xi_miscible_max(k), &
+               merge(Xi_miscible_min(k) - s%xa(i_Xi, k), 0d0, .not. is_miscible(k))
+         end if
+      end do
+   
+      ! Clean up if we opened a file
+      if (write_to_file) then
+         close(out_unit)
+      end if
+
+end subroutine print_misibility_info
 
 
 end module element_sedimentation
