@@ -1,592 +1,873 @@
+#!/usr/bin/env python3
 """
-Author: Henrik Knierim
-Script: install.py
-Description: This script installs element_sedimentation.
-Date: 2025-05-28
+Install the element_sedimentation extension into a MESA tree.
+
+The extension consists of five Fortran sources that are copied into
+$MESA_DIR/star/private and a handful of MESA files that are patched by anchor
+insertion. Each patch snippet in ./code consists of blocks
+
+    ! anchor = '<text of a line in the MESA file>'[; replace | ; prepend | ; all]
+    <lines to insert>
+
+The lines are inserted after the (unique) MESA line containing <text>, or
+instead of it (replace), before it (prepend), or after every occurrence (all).
+Pristine MESA files are backed up to ./backup together with the MESA version
+they came from; uninstall restores them.
+
+    python3 setup.py <command> [-f NAME] [-y] [--no-build] [--force] [-v] [--mesa-dir DIR]
+
+Commands:
+    install            patch MESA, copy the sources, full MESA rebuild (./clean; ./install)
+    soft_install       patch MESA, copy the sources, rebuild star_data and star only
+    uninstall          restore MESA, remove the sources, rebuild star_data and star
+    soft_uninstall     same as uninstall (kept for compatibility)
+    reinstall          uninstall + install (full rebuild)
+    soft_reinstall     uninstall + soft_install
+    single_install     patch/copy one file (-f NAME) and rebuild its module
+    single_uninstall   restore/remove one file (-f NAME) and rebuild its module
+    single_reinstall   restore + patch one file (-f NAME) and rebuild its module
+    status             which MESA files are patched, which sources are present, versions
+    check              dry run: parse every snippet and verify the anchors (MESA is not modified)
+    clean              remove the backup directory
+
+Importing this module has no side effects (MESA_DIR is only read when needed).
+Requires Python >= 3.9, standard library only.
 """
 
-import os
-import shutil
+from __future__ import annotations
+
 import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
 
-# dictionary with the installation information
-NEW_FILE_NAME = "element_sedimentation.f90"
-install_info = {
-    # # star/make
+SCRIPT_DIR = Path(__file__).resolve().parent
+CODE_DIR = SCRIPT_DIR / "code"
+BACKUP_DIR = SCRIPT_DIR / "backup"
+VERSION_FILE = BACKUP_DIR / "MESA_VERSION"
+
+# a MESA file is pristine if it does not contain this substring
+MARKER = "element_sedimentation"
+
+# the new sources (copied, in dependency order) and the patched MESA files
+NEW_SOURCES = (
+    "advection_diffusion.f90",
+    "sedimentation_phase_diagram.f90",
+    "sedimentation_miscibility.f90",
+    "element_sedimentation_legacy.f90",
+    "element_sedimentation.f90",
+)
+
+INSTALL_INFO: dict[str, dict] = {
+    # star/make
     "makefile_base": {"mesa_path": "star/make", "replace": False},
-    # # star/defaults
+    # star/defaults
     "controls.defaults": {"mesa_path": "star/defaults", "replace": False},
-    # # star/private
+    # star/private (patched)
     "alloc.f90": {"mesa_path": "star/private", "replace": False},
     "ctrls_io.f90": {"mesa_path": "star/private", "replace": False},
     "evolve.f90": {"mesa_path": "star/private", "replace": False},
     "hydro_energy.f90": {"mesa_path": "star/private", "replace": False},
     "init.f90": {"mesa_path": "star/private", "replace": False},
-    NEW_FILE_NAME: {"mesa_path": "star/private", "replace": True},
-    # # star_data/private
+    # star_data
     "star_controls.inc": {"mesa_path": "star_data/private", "replace": False},
-    # # star_data/public
     "star_data_step_work.inc": {"mesa_path": "star_data/public", "replace": False},
 }
+for _name in NEW_SOURCES:
+    INSTALL_INFO[_name] = {"mesa_path": "star/private", "replace": True}
 
-verbose = False
-debug = False
+# MESA modules to rebuild after patching (order matters: star depends on star_data;
+# ./clean is required because the .inc changes alter the star_info type)
+BUILD_DIRS = ("star_data", "star")
 
+MODE_APPEND = "append"
+MODE_REPLACE = "replace"
+MODE_PREPEND = "prepend"
+MODE_APPEND_ALL = "all"
 
-# modes of the installation file
-DO_APPEND: int = 0  # append the new content after the anchor
-DO_REPLACE: int = 1 # replace the anchor with the new content
-DO_PREPEND: int = 2 # prepend the new content before the anchor
-DO_APPEND_ALL: int = 3 # append the new content after all occurences of the anchor
+ANCHOR_RE = re.compile(r"^! anchor = '(.*)'\s*(?:;\s*(replace|prepend|all))?\s*$")
 
-# First, check if `$MESA_DIR` is set
-if "MESA_DIR" not in os.environ:
-    raise ValueError(
-        "Please set the environment variable $MESA_DIR to the path of your MESA installation."
-    )
-else:
-    mesa_dir = os.environ["MESA_DIR"]
-    print(f"MESA_DIR is set to {mesa_dir}.") if debug else None
-
-mesa_path = lambda *path: os.path.join(mesa_dir, *path)
-# Define the path to the new code in ./code (relative to the script)
-code_dir = "./code"
-backup_dir = "./backup"
-
-# Check if the code directory exists
-if not os.path.exists(code_dir):
-    raise FileNotFoundError(f"{code_dir} not found.")
-else:
-    print(f"Found {code_dir}.") if debug else None
-
-# Check if the backup directory exists
-if not os.path.exists(backup_dir):
-    os.makedirs(backup_dir)
-    print(f"Created {backup_dir}.") if verbose else None
+VERBOSE = False
 
 
-# Define Class for the files that need to be modified
+class SetupError(Exception):
+    """A problem that should be reported to the user without a traceback."""
+
+
+def log(msg: str) -> None:
+    if VERBOSE:
+        print(msg)
+
+
+def hr() -> None:
+    print("-" * 80)
+
+
+# ---------------------------------------------------------------------------
+# MESA tree
+# ---------------------------------------------------------------------------
+
+_MESA_DIR_OVERRIDE: Path | None = None
+
+
+def mesa_dir() -> Path:
+    """Path of the MESA installation (--mesa-dir or $MESA_DIR)."""
+    if _MESA_DIR_OVERRIDE is not None:
+        path = _MESA_DIR_OVERRIDE
+    else:
+        value = os.environ.get("MESA_DIR")
+        if not value:
+            raise SetupError(
+                "the environment variable MESA_DIR is not set "
+                "(point it to your MESA installation or use --mesa-dir)"
+            )
+        path = Path(value)
+    if not path.is_dir():
+        raise SetupError(f"MESA_DIR = {path} is not a directory")
+    return path
+
+
+def mesa_version() -> str:
+    """Contents of $MESA_DIR/data/version_number ('unknown' if absent)."""
+    path = mesa_dir() / "data" / "version_number"
+    if not path.is_file():
+        return "unknown"
+    return path.read_text().strip()
+
+
+def backup_version() -> str | None:
+    """MESA version the backups were taken from, None if no version file."""
+    if not VERSION_FILE.is_file():
+        return None
+    return VERSION_FILE.read_text().strip()
+
+
+def is_patched_text(text: str) -> bool:
+    return MARKER in text
+
+
+# ---------------------------------------------------------------------------
+# snippets
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Snippet:
+    anchor: str
+    mode: str
+    lines: list[str] = field(default_factory=list)
+
+
+def parse_snippet_text(text: str, name: str) -> list[Snippet]:
+    """Split a snippet file into (anchor, mode, lines) blocks."""
+    snippets: list[Snippet] = []
+    for lineno, line in enumerate(text.splitlines(keepends=True), start=1):
+        if line.startswith("! anchor ="):
+            match = ANCHOR_RE.match(line.rstrip("\r\n"))
+            if match is None:
+                raise SetupError(f"{name}:{lineno}: malformed anchor line: {line.rstrip()}")
+            anchor, mode = match.group(1), match.group(2) or MODE_APPEND
+            if not anchor:
+                raise SetupError(f"{name}:{lineno}: empty anchor")
+            snippets.append(Snippet(anchor, mode))
+        elif snippets:
+            snippets[-1].lines.append(line)
+        elif line.strip():
+            raise SetupError(f"{name}:{lineno}: content before the first anchor")
+    if not snippets:
+        raise SetupError(f"no anchor found in {name}")
+    for sn in snippets:
+        if not sn.lines and sn.mode != MODE_REPLACE:
+            raise SetupError(f"{name}: anchor {sn.anchor!r} has no content")
+        if sn.lines and not sn.lines[-1].endswith("\n"):
+            sn.lines[-1] += "\n"
+    return snippets
+
+
+def parse_snippet_file(path: Path) -> list[Snippet]:
+    if not path.is_file():
+        raise SetupError(f"snippet file {path} not found")
+    return parse_snippet_text(path.read_text(), path.name)
+
+
+def find_anchor(lines: list[str], sn: Snippet, name: str) -> list[int]:
+    """Indices of the lines containing the anchor; raises unless the count is valid."""
+    hits = [i for i, line in enumerate(lines) if sn.anchor in line]
+    if not hits:
+        raise SetupError(f"anchor {sn.anchor!r} not found in {name}")
+    if len(hits) > 1 and sn.mode != MODE_APPEND_ALL:
+        raise SetupError(
+            f"anchor {sn.anchor!r} found {len(hits)} times in {name} "
+            "(use '; all' to patch every occurrence)"
+        )
+    return hits
+
+
+def apply_snippets(lines: list[str], snippets: list[Snippet], name: str) -> list[str]:
+    """Return a patched copy of lines (lines of a pristine MESA file)."""
+    lines = list(lines)
+    for sn in snippets:
+        for i in reversed(find_anchor(lines, sn, name)):
+            if sn.mode in (MODE_APPEND, MODE_APPEND_ALL):
+                start, end = i + 1, i + 1
+            elif sn.mode == MODE_REPLACE:
+                start, end = i, i + 1
+            elif sn.mode == MODE_PREPEND:
+                start, end = i, i
+            else:  # pragma: no cover - the regex only admits the modes above
+                raise SetupError(f"unknown insert mode {sn.mode!r}")
+            if sn.mode == MODE_PREPEND:
+                present = lines[max(i - len(sn.lines), 0) : i] == sn.lines
+            else:
+                present = bool(sn.lines) and lines[start : start + len(sn.lines)] == sn.lines
+            if present:
+                log(f"   content of anchor {sn.anchor!r} already present in {name}")
+                continue
+            lines[start:end] = sn.lines
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# installation files
+# ---------------------------------------------------------------------------
+
+
 class InstallationFile:
-    def __init__(
-        self, name: str, replace_file: bool = False, *mesa_path_vars, **kwargs
-    ) -> None:
-        """Initializes the InstallationFile object.
+    """One file of the extension: a snippet patching a MESA file, or a new source."""
 
-        If replace_file is True, the file will be replaced with the new content.
-        Otherwise, the new content will be inseted to the existing file.
-        """
+    def __init__(self, name: str) -> None:
+        if name not in INSTALL_INFO:
+            raise SetupError(f"unknown file {name!r}; known files: {', '.join(INSTALL_INFO)}")
+        info = INSTALL_INFO[name]
         self.name = name
+        self.replace: bool = info["replace"]
+        self.code_path = CODE_DIR / name
+        self.mesa_subdir = Path(info["mesa_path"])
+        self.mesa_file = mesa_dir() / self.mesa_subdir / name
+        self.module_dir = mesa_dir() / self.mesa_subdir.parts[0]  # star or star_data
+        self.backup_path = BACKUP_DIR / (name + ".bak")
+        if not self.code_path.is_file():
+            raise SetupError(f"{self.code_path} not found")
+        if not self.replace and not self.mesa_file.is_file():
+            raise SetupError(f"{self.mesa_file} not found")
 
-        self.code_path = os.path.join(code_dir, name)
+    # --- state -------------------------------------------------------------
 
-        # check if the code file exists
-        if not os.path.exists(self.code_path):
-            raise FileNotFoundError(f"{self.code_path} not found.")
+    def is_patched(self) -> bool:
+        """True if the MESA file contains the extension (for new sources: exists)."""
+        if self.replace:
+            return self.mesa_file.is_file()
+        return is_patched_text(self.mesa_file.read_text())
 
-        self.mesa_path: str = mesa_path(*mesa_path_vars)
-        self.full_mesa_path: str = os.path.join(self.mesa_path, name)
-        self.module_path: str = os.path.dirname(self.mesa_path)
+    def has_backup(self) -> bool:
+        return self.backup_path.is_file()
 
-        # check if the mesa file exists
-        # skip the check for the new file
-        if not os.path.exists(self.full_mesa_path) and self.name != NEW_FILE_NAME:
-            raise FileNotFoundError(f"{self.full_mesa_path} not found.")
+    @property
+    def backup_version_path(self) -> Path:
+        return BACKUP_DIR / (self.name + ".bak.version")
 
-        self.backup_path: str = os.path.join(backup_dir, name + ".bak")
-        self.replace_file: bool = replace_file
+    def backup_version(self) -> str | None:
+        """MESA version this file's backup was taken from (falls back to the global record)."""
+        if self.backup_version_path.is_file():
+            return self.backup_version_path.read_text().strip()
+        return backup_version()
+
+    def backup_text(self) -> str:
+        """Text of the backup; refuses a backup that is not pristine."""
+        if not self.has_backup():
+            raise SetupError(f"no backup found for {self.name} in {BACKUP_DIR}")
+        text = self.backup_path.read_text()
+        if is_patched_text(text):
+            raise SetupError(
+                f"the backup {self.backup_path} is not pristine (it contains '{MARKER}');\n"
+                "   restore the MESA file by hand (e.g. from a fresh MESA download), then delete the backup"
+            )
+        return text
+
+    def is_up_to_date(self) -> bool | None:
+        """True if the MESA file is exactly what installing the current code/ version gives,
+        False if it differs, None if that cannot be decided (no usable pristine backup)."""
+        if self.replace:
+            return self.mesa_file.is_file() and self.mesa_file.read_bytes() == self.code_path.read_bytes()
+        if not self.is_patched():
+            return False
+        try:
+            lines = self.pristine_text().splitlines(keepends=True)
+        except SetupError:
+            return None
+        try:
+            expected = "".join(apply_snippets(lines, parse_snippet_file(self.code_path), self.name))
+        except SetupError:
+            return False
+        return self.mesa_file.read_text() == expected
+
+    def pristine_text(self) -> str:
+        """Text of the pristine MESA file (from MESA itself, or from the backup)."""
+        if self.replace:
+            raise SetupError(f"{self.name} is a new source file; it has no pristine version")
+        text = self.mesa_file.read_text()
+        if not is_patched_text(text):
+            return text
+        if self.has_backup():
+            return self.backup_text()
+        raise SetupError(f"{self.mesa_file} is patched and no backup exists in {BACKUP_DIR}")
+
+    # --- actions -----------------------------------------------------------
 
     def backup(self) -> None:
-        """Backs up the mesa file to the backup directory."""
-        # check if the backup directory exists
-        if not os.path.exists(backup_dir):
-            os.makedirs(backup_dir)
-
-        # check if the backup file already exists and return if it does
-        if os.path.exists(self.backup_path):
+        """(Re)take the backup whenever the MESA file is pristine."""
+        if self.replace:
             return
-
-        # skip backup for the new file
-        if self.name == NEW_FILE_NAME:
-            return
-
-        shutil.copy(self.full_mesa_path, self.backup_path)
-        print(f"Backed up {self.name} to {self.backup_path}.") if verbose else None
-
-    def read_installation_file(self, **kwargs) -> tuple[list[str], list[list[str]], list[int]]:
-        """Reads the installation file and returns the anchors and the new contents."""
-
-        with open(self.code_path, "r") as code_file:
-            # the anchors always follows the pattern ! anchor = '<anchor>'
-            # first, we find all lines that start with `! anchor =`
-
-            lines = code_file.readlines()
-
-            # check if the file is empty
-            if not lines:
-                raise ValueError(f"{self.code_path} is empty.")
-
-            # find all lines their respective indices that start with `! anchor =`
-            i_anchors: list[int] = [
-                i for i, line in enumerate(lines) if line.startswith("! anchor =")
-            ]
-            
-            # check if the file contains the `replace` keyword
-            # in this case, we replace the anchor instead of inserting new content after it
-            insert_mode: list[int] = []
-            for line in lines:
-                if line.startswith("! anchor ="):
-                    if line.strip().split(";")[-1].endswith("replace"):
-                        insert_mode.append(DO_REPLACE)
-                    elif line.strip().split(";")[-1].endswith("prepend"):
-                        insert_mode.append(DO_PREPEND)
-                    elif line.strip().split(";")[-1].endswith("all"):
-                        insert_mode.append(DO_APPEND_ALL)
-                    else:   # default is to append
-                        insert_mode.append(DO_APPEND)
-
-            # if there are no anchors, raise an error
-            if not i_anchors:
-                raise ValueError(f"No anchor found in {self.code_path}.")
-
-            anchors: list[str] = [
-                lines[i].strip().split("=", maxsplit=1)[1].split(";")[0].strip().strip("'\"")
-                for i in i_anchors
-            ]
-
-            # the new contents are between the anchors
-            new_contents: list[list[str]] = []
-            for i, anchor in enumerate(anchors):
-                # find the start and end index of the new content
-                i_start = i_anchors[i] + 1
-                i_end = i_anchors[i + 1] if i < len(i_anchors) - 1 else len(lines)
-
-                # append the new content to the new_content list
-                new_contents.append(lines[i_start:i_end])
-
-            # if there is no '\n' at the end of new content, add it
-            for new_content in new_contents:
-                if not new_content[-1].endswith("\n"):
-                    new_content[-1] += "\n"
-
-            # print anchor and new content
-            print("Anchors:", *anchors) if debug else None
-            print("New contents:", *new_content) if debug else None
-            print("insert_mode:", *insert_mode) if debug else None
-
-        return anchors, new_contents, insert_mode
-
-    def modify(self, new_content: list, anchor: str, insert_mode : int, **kwargs) -> None:
-        """Inserts new content into the mesa file at the anchor."""
-        self.backup()
-        lines = []
-        with open(self.full_mesa_path, "r") as file:
-            lines = file.readlines()
-
-        # find all occurences of the anchor
-        anchors: list[int] = [i for i, line in enumerate(lines) if anchor in line]
-
-        # if there are no anchors, raise an error
-        if not anchors:
-            raise ValueError(f"Anchor {anchor} not found in {self.name}.")
-
-        elif len(anchors) > 1 and insert_mode != DO_APPEND_ALL:
-            raise ValueError(f"Multiple anchors {anchor} found in {self.name}.")
-
-        for i_anchor in reversed(anchors):
-            if insert_mode == DO_APPEND or insert_mode == DO_APPEND_ALL:
-                # new content is sandwiched between the anchor and the next line
-                i_start: int = i_anchor + 1
-                i_end: int = i_anchor + 1
-
-            elif insert_mode == DO_REPLACE:
-                # new content replaces the anchor
-                i_start: int = i_anchor
-                i_end: int = i_anchor + 1
-
-            elif insert_mode == DO_PREPEND:
-                # new content is prepended before the anchor
-                i_start: int = i_anchor
-                i_end: int = i_anchor
-
-            # check if the new content is already in the file
-            if new_content == lines[i_start : i_start + len(new_content)]:
-                print(f"Content already in {self.name}.") if verbose else None
-                return
-
-            lines[i_start : i_end] = new_content
-
-        with open(self.full_mesa_path, "w") as file:
-            file.writelines(lines)
-
-        print(f"Modified {self.name}.") if verbose else None
-
-        format = kwargs.get("format", False)
-        if format:
-            self.format(**kwargs)
-
-    def format(self, **kwargs) -> None:
-        """Formats the MESA file."""
-
-        indentation: int = kwargs.get("indentation", 3)
-        # test if indentation is an integer
-        if not isinstance(indentation, int):
-            raise ValueError("Indentation must be an integer.")
-
-        shift: int = kwargs.get("shift", 0)
-        # test if shift is an integer
-        if not isinstance(shift, int):
-            raise ValueError("Shift must be an integer.")
-
-        # try to format the file. If it fails, print a warning.
-        try:
-            # format the file and save it to a temporary file
-            os.system(
-                f"findent -I{shift} -i{indentation} -funix < {self.full_mesa_path} > {self.full_mesa_path}.tmp"
+        if not self.is_patched():
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.mesa_file, self.backup_path)
+            # per-file record only: the global backup/MESA_VERSION is kept as a read-only
+            # fallback for backups made by older versions of this script, so retaking one
+            # backup must not change the recorded origin of the others
+            self.backup_version_path.write_text(mesa_version() + "\n")
+            log(f"   backed up {self.name} to {self.backup_path}")
+        elif not self.has_backup():
+            raise SetupError(
+                f"{self.mesa_file} is already patched but no backup exists in {BACKUP_DIR};\n"
+                "   restore the pristine file by hand (e.g. from a fresh MESA download) before installing"
             )
 
-            # move the temporary file to the original file
-            os.system(f"mv {self.full_mesa_path}.tmp {self.full_mesa_path}")
-
-            # print a success message
-            print(f"Formatted {self.name}.") if verbose else None
-
-        except:
-            (
-                print(f"Could not format {self.name}. Is `findent` installed?")
-                if verbose
-                else None
-            )
-
-    def insert(self, **kwargs) -> None:
-        """Reads the new code and inserts it into the relevant MESA file."""
-
-        # if self.replace is True, throw an error
-        if self.replace_file:
-            raise ValueError("Cannot insert code if replace is True.")
-
-        # get the anchor and the new content
-        anchors, new_contents, insert_modes = self.read_installation_file(**kwargs)
-
-        # modify the mesa file
-        for anchor, new_content, insert_mode in zip(anchors, new_contents, insert_modes):
-            self.modify(new_content, anchor, insert_mode, **kwargs)
-
-    def install(self, **kwargs) -> None:
-        """Installs the new code in the MESA directory.
-
-        Description:
-        If replace is True, the file will be replaced with the new content.
-        Otherwise, the new content will be inseted to the existing file.
-        """
-
-        # first, backup the original file
-        self.backup()
-
-        # Either replace the file or insert the new code into the file
-        if self.replace_file:
-            shutil.copy(self.code_path, self.full_mesa_path)
-
-            # if the file is the new file, we are done
-            if self.name == NEW_FILE_NAME:
-                print(f"Copied {self.name} into {self.mesa_path}.") if verbose else None
-            else:
-                print(f"Replaced {self.name} with new file.") if verbose else None
+    def check_backup_version(self, force: bool) -> None:
+        current, backed = mesa_version(), self.backup_version()
+        if backed is None:
+            msg = f"the backup of {self.name} has no MESA version record"
+        elif backed != current:
+            msg = f"the backup of {self.name} is from MESA {backed} but MESA_DIR is {current}"
         else:
-            self.insert(**kwargs)
-            (
-                print(f"Finished inserting the new code into {self.name}.")
-                if verbose
-                else None
-            )
-
-    def uninstall(self) -> None:
-        """Uninstalls the new code from the MESA directory."""
-
-        # for the new file, simply remove the file
-        if self.name == NEW_FILE_NAME:
-            os.remove(self.full_mesa_path)
-            print(f"Removed {self.name}.") if verbose else None
             return
+        if force:
+            print(f"WARNING: {msg}; restoring anyway (--force)")
+        else:
+            raise SetupError(msg + " (use --force to restore anyway)")
 
-        # check if the backup file exists
-        if not os.path.exists(self.backup_path):
-            raise FileNotFoundError(f"No backup found for {self.name}.")
+    def restore(self, force: bool = False) -> None:
+        """Copy the backup over the (patched) MESA file."""
+        if not self.has_backup():
+            raise SetupError(f"no backup found for {self.name} in {BACKUP_DIR}")
+        self.check_backup_version(force)
+        text = self.backup_text()
+        # write (do not copy2): the restored file must be newer than its object file,
+        # otherwise a build without ./clean keeps the patched object
+        self.mesa_file.write_text(text)
+        log(f"   restored {self.name}")
 
-        # restore the original file
-        shutil.copy(self.backup_path, self.full_mesa_path)
-        print(f"Restored {self.name}.") if verbose else None
+    def install(self, force: bool = False) -> None:
+        """Copy a new source, or patch the MESA file (from its pristine version)."""
+        if self.replace:
+            shutil.copy(self.code_path, self.mesa_file)  # current mtime, so that make recompiles it
+            log(f"   copied {self.name} into {self.mesa_file.parent}")
+            return
+        self.backup()
+        if self.is_patched():
+            # patch the pristine version again: this makes install idempotent and
+            # picks up changes of the snippet
+            self.restore(force)
+            # the MESA file is pristine now: retake the backup, which records its MESA version
+            # (after a --force restore of a backup without a record this adopts it)
+            self.backup()
+        snippets = parse_snippet_file(self.code_path)
+        lines = self.mesa_file.read_text().splitlines(keepends=True)
+        lines = apply_snippets(lines, snippets, self.name)
+        self.mesa_file.write_text("".join(lines))
+        log(f"   patched {self.name}")
+
+    def uninstall(self, force: bool = False) -> None:
+        """Remove a new source, or restore the MESA file from the backup."""
+        if self.replace:
+            if self.mesa_file.is_file():
+                self.mesa_file.unlink()
+                log(f"   removed {self.mesa_file}")
+            return
+        if not self.is_patched():
+            log(f"   {self.name} is pristine, nothing to restore")
+            return
+        self.restore(force)
+
+    def check(self) -> list[str]:
+        """Dry run: problems found while applying the snippet to the pristine file."""
+        problems: list[str] = []
+        if self.replace:
+            return problems
+        try:
+            snippets = parse_snippet_file(self.code_path)
+            lines = self.pristine_text().splitlines(keepends=True)
+            for sn in snippets:
+                hits = find_anchor(lines, sn, self.name)
+                log(f"   {self.name}: anchor {sn.anchor!r} ({sn.mode}) found {len(hits)}x")
+            apply_snippets(lines, snippets, self.name)
+        except SetupError as exc:
+            problems.append(str(exc))
+        return problems
 
 
-# Init the argument parser
-parser = argparse.ArgumentParser(description="Install or uninstall the software.")
-
-# Add the arguments
-parser.add_argument(
-    "command",
-    choices=[
-        "install",
-        "uninstall",
-        "reinstall",
-        "clean",
-        "soft_install",
-        "soft_uninstall",
-        "soft_reinstall",
-        "single_install",
-        "single_uninstall",
-        "single_reinstall",
-    ],
-    help="The command to execute.",
-)
-
-parser.add_argument('-f', '--filename', help='Filename for single operations')
-
-# Parse the arguments
-args = parser.parse_args()
-
-print(f"Executing command: {args.command}") if debug else None
-
-if args.command == "install":
-
-    # install all the files in the install_info dictionary
-    for key, value in install_info.items():
-    
-        print("-" * 80) if verbose else None
-        file = InstallationFile(key, value["replace"], value["mesa_path"])
-        file.install()
-
-    # execute ./clean and ./install in the MESA directory
-    os.system("cd $MESA_DIR; ./clean; ./install")
+def all_files() -> list[InstallationFile]:
+    return [InstallationFile(name) for name in INSTALL_INFO]
 
 
-    # execute ./clean and ./mk in the $MESA_DIR/eos directory
-    os.system("cd $MESA_DIR/eos; ./clean; ./mk; ./export")
+# ---------------------------------------------------------------------------
+# building
+# ---------------------------------------------------------------------------
 
-    # execute ./clean and ./mk in the $MESA_DIR/star_data directory
-    os.system("cd $MESA_DIR/star_data; ./clean; ./mk; ./export")
 
-    # execute ./clean and ./mk in the $MESA_DIR/star directory
-    os.system("cd $MESA_DIR/star; ./clean; ./mk; ./export")
+def run(cmd: list[str], cwd: Path) -> None:
+    """Run one of MESA's build scripts (./clean, ./mk, ./export, ./install) in cwd.
 
-    # remind the user to run ./clean and ./mk in their work directory
-    print("-" * 80)
-    print("Gentle mixing was succesfully installed!")
+    MESA's scripts are not all executable with a shebang line (e.g. star_data/clean
+    is a plain list of shell commands), so they are always run through bash.
+    """
+    print(f"$ (cd {cwd} && {' '.join(cmd)})")
+    script = cwd / cmd[0]
+    if not script.exists():
+        raise SetupError(f"cannot run {cmd[0]} in {cwd}: no such file")
+    env = dict(os.environ)
+    env["MESA_DIR"] = str(mesa_dir())  # --mesa-dir must also apply to MESA's build scripts
+    try:
+        subprocess.run(["bash", str(script)] + cmd[1:], cwd=cwd, check=True, env=env)
+    except OSError as exc:
+        raise SetupError(f"cannot run {cmd[0]} in {cwd}: {exc}") from exc
+    except subprocess.CalledProcessError as exc:
+        raise SetupError(f"{' '.join(cmd)} in {cwd} failed with exit status {exc.returncode}") from exc
+
+
+def build_modules(dirs=BUILD_DIRS, clean: bool = True) -> None:
+    """./clean; ./mk; ./export in the given MESA module directories."""
+    for name in dirs:
+        cwd = mesa_dir() / name
+        if clean:
+            run(["./clean"], cwd)
+        run(["./mk"], cwd)
+        run(["./export"], cwd)
+
+
+def full_rebuild() -> None:
+    """./clean; ./install in MESA_DIR (rebuilds every MESA module)."""
+    run(["./clean"], mesa_dir())
+    run(["./install"], mesa_dir())
+
+
+def confirm(question: str, assume_yes: bool) -> bool:
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        raise SetupError(f"{question} -- no terminal to confirm; use -y/--yes")
+    return input(f"{question} [y/N]: ").strip().lower() in ("y", "yes")
+
+
+def remind() -> None:
+    hr()
     print("Don't forget to run ./clean and ./mk in your work directory.")
-    print("-" * 80)
+    hr()
 
-elif args.command == "soft_install":
-    # recompiling the code without running ./clean and ./install
-    # install all the files in the install_info dictionary
-    for key, value in install_info.items():
-        print("-" * 80) if verbose else None
-        file = InstallationFile(key, value["replace"], value["mesa_path"])
-        file.install()
 
-    # ask the user if they want to clean the mesa dirs
-    clean: bool = (
-        input("Do you want to clean the mesa directories? (y/n): ").lower() == "y"
-    )
-    if clean:
+def check_backup_consistency(force: bool, files: list[InstallationFile] | None = None) -> None:
+    """Before anything is modified: every patched MESA file must have a pristine backup taken
+    from the current MESA version (version mismatches can be overridden with --force).
+    Checking up front keeps a failing install/uninstall from leaving MESA half restored."""
+    current = mesa_version()
+    problems, stale = [], []
+    for f in files if files is not None else all_files():
+        if f.replace or not f.is_patched():
+            continue
+        try:
+            f.backup_text()
+        except SetupError as exc:
+            problems.append(str(exc))
+            continue
+        backed = f.backup_version()
+        if backed is None or backed != current:
+            stale.append(f"{f.name} (backup from MESA {backed or 'unknown'})")
+    if problems:
+        raise SetupError("cannot restore the pristine MESA files:\n   " + "\n   ".join(problems))
+    if stale:
+        msg = (f"MESA_DIR ({current}) is patched but these backups are not recorded as taken from it: "
+               f"{', '.join(stale)}")
+        if not force:
+            raise SetupError(
+                msg + ".\n   If the backups are from this MESA (e.g. made by an older version of this "
+                "script, which did not record versions), run 'python3 setup.py soft_install --force' once: "
+                "it restores and retakes them with a version record. Otherwise restore the files by hand.")
+        print(f"WARNING: {msg}; restoring anyway (--force)")
 
-        # execute ./clean and ./mk in the $MESA_DIR/eos directory
-        os.system("cd $MESA_DIR/eos; ./clean; ./mk; ./export")
 
-        # execute ./clean and ./mk in the $MESA_DIR/star_data directory
-        os.system("cd $MESA_DIR/star_data; ./clean; ./mk; ./export")
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
 
-        # execute ./clean and ./mk in the $MESA_DIR/star directory
-        os.system("cd $MESA_DIR/star; ./clean; ./mk; ./export")
+
+def check_snippets_apply(files: list[InstallationFile] | None = None) -> None:
+    """Dry run of every snippet against the pristine MESA files; raise before anything is
+    modified if an anchor is missing (e.g. after a MESA upgrade)."""
+    problems = [msg for f in (files if files is not None else all_files()) for msg in f.check()]
+    if problems:
+        raise SetupError("the patch snippets do not apply to this MESA; nothing was modified:\n   "
+                         + "\n   ".join(problems))
+
+
+def do_install_files(force: bool) -> None:
+    check_backup_consistency(force)
+    check_snippets_apply()
+    for f in all_files():
+        print(f"installing {f.name}")
+        f.install(force)
+
+
+def do_uninstall_files(force: bool) -> None:
+    check_backup_consistency(force)
+    for f in all_files():
+        print(f"uninstalling {f.name}")
+        f.uninstall(force)
+
+
+def cmd_install(args) -> None:
+    if not args.no_build and not confirm(
+        f"Patch MESA at {mesa_dir()} and run a full rebuild (./clean; ./install)?", args.yes
+    ):
+        raise SetupError("aborted")
+    do_install_files(args.force)
+    if not args.no_build:
+        full_rebuild()
+    hr()
+    print("element_sedimentation was successfully installed.")
+    remind()
+
+
+def cmd_soft_install(args) -> None:
+    do_install_files(args.force)
+    if not args.no_build:
+        build_modules()
+    hr()
+    print("element_sedimentation was successfully installed (star_data and star rebuilt).")
+    remind()
+
+
+def cmd_uninstall(args) -> None:
+    do_uninstall_files(args.force)
+    if not args.no_build:
+        build_modules()
+    hr()
+    print("element_sedimentation was successfully uninstalled (star_data and star rebuilt).")
+    remind()
+
+
+def cmd_reinstall(args) -> None:
+    if not args.no_build and not confirm(
+        f"Re-patch MESA at {mesa_dir()} and run a full rebuild (./clean; ./install)?", args.yes
+    ):
+        raise SetupError("aborted")
+    check_backup_consistency(args.force)
+    check_snippets_apply()  # a reinstall that cannot succeed must not uninstall first
+    do_uninstall_files(args.force)
+    do_install_files(args.force)
+    if not args.no_build:
+        full_rebuild()
+    hr()
+    print("element_sedimentation was successfully reinstalled.")
+    remind()
+
+
+def cmd_soft_reinstall(args) -> None:
+    check_backup_consistency(args.force)
+    check_snippets_apply()  # a reinstall that cannot succeed must not uninstall first
+    do_uninstall_files(args.force)
+    do_install_files(args.force)
+    if not args.no_build:
+        build_modules()
+    hr()
+    print("element_sedimentation was successfully reinstalled (star_data and star rebuilt).")
+    remind()
+
+
+def single_file(args) -> InstallationFile:
+    name = args.filename
+    if not name:
+        if args.yes or not sys.stdin.isatty():
+            raise SetupError("single_* commands need -f/--filename NAME")
+        name = input("Enter the file name: ").strip()
+    return InstallationFile(name)
+
+
+def build_for_single(f: InstallationFile, args) -> None:
+    if args.no_build:
+        return
+    if f.module_dir.name == "star_data":
+        # star_info changed: star must be rebuilt from scratch as well
+        build_modules(("star_data", "star"))
     else:
+        build_modules(("star",), clean=False)
 
-        # execute ./mk in the $MESA_DIR/eos directory
-        os.system("cd $MESA_DIR/eos; ./mk; ./export")
 
-        # execute ./mk in the $MESA_DIR/star_data directory
-        os.system("cd $MESA_DIR/star_data; ./mk; ./export")
+def cmd_single_install(args) -> None:
+    f = single_file(args)
+    check_backup_consistency(args.force, [f])
+    check_snippets_apply([f])
+    f.install(args.force)
+    build_for_single(f, args)
+    hr()
+    print(f"{f.name} was successfully installed.")
+    remind()
 
-        # execute ./mk in the $MESA_DIR/star directory
-        os.system("cd $MESA_DIR/star; ./mk; ./export")
 
-    # remind the user to run ./clean and ./mk in their work directory
-    print("-" * 80)
-    print("Gentle mixing was succesfully compilled!")
-    print("Don't forget to run ./clean and ./mk in your work directory.")
-    print("-" * 80)
+def cmd_single_uninstall(args) -> None:
+    f = single_file(args)
+    check_backup_consistency(args.force, [f])
+    f.uninstall(args.force)
+    build_for_single(f, args)
+    hr()
+    print(f"{f.name} was successfully uninstalled.")
+    remind()
 
-elif args.command == "uninstall":
 
-    # uninstall all the files in the install_info dictionary
-    for key, value in install_info.items():
-        file = InstallationFile(key, value["replace"], value["mesa_path"])
-        file.uninstall()
+def cmd_single_reinstall(args) -> None:
+    f = single_file(args)
+    check_backup_consistency(args.force, [f])
+    check_snippets_apply([f])
+    f.uninstall(args.force)
+    f.install(args.force)
+    build_for_single(f, args)
+    hr()
+    print(f"{f.name} was successfully reinstalled.")
+    remind()
 
-    # execute ./clean and ./install in the MESA directory
-    os.system("cd $MESA_DIR; ./clean; ./install")
 
-    # remind the user to run ./clean and ./mk in their work directory
-    print("-" * 80)
-    print("Gentle mixing was succesfully uninstalled.")
-    print("Don't forget to run ./clean and ./mk in your work directory.")
-    print("-" * 80)
-
-elif args.command == "soft_uninstall":
-
-    # uninstall all the files in the install_info dictionary
-    for key, value in install_info.items():
-        file = InstallationFile(key, value["replace"], value["mesa_path"])
-        file.uninstall()
-
-    # ask the user if they want to clean the mesa dirs
-    clean: bool = (
-        input("Do you want to clean the mesa directories? (y/n): ").lower() == "y"
-    )
-    if clean:
-
-        # execute ./clean and ./mk in the $MESA_DIR/eos directory
-        os.system("cd $MESA_DIR/eos; ./clean; ./mk; ./export")
-
-        # execute ./clean and ./mk in the $MESA_DIR/star_data directory
-        os.system("cd $MESA_DIR/star_data; ./clean; ./mk; ./export")
-
-        # execute ./clean and ./mk in the $MESA_DIR/star directory
-        os.system("cd $MESA_DIR/star; ./clean; ./mk; ./export")
+def cmd_status(args) -> int:
+    print(f"MESA_DIR:       {mesa_dir()}")
+    print(f"MESA version:   {mesa_version()}")
+    current_version = mesa_version()
+    if BACKUP_DIR.is_dir():
+        print(f"backup dir:     {BACKUP_DIR}")
     else:
-
-        # execute ./mk in the $MESA_DIR/eos directory
-        os.system("cd $MESA_DIR/eos; ./mk; ./export")
-
-        # execute ./mk in the $MESA_DIR/star_data directory
-        os.system("cd $MESA_DIR/star_data; ./mk; ./export")
-
-        # execute ./mk in the $MESA_DIR/star directory
-        os.system("cd $MESA_DIR/star; ./mk; ./export")
-
-    # remind the user to run ./clean and ./mk in their work directory
-    print("-" * 80)
-    print("Gentle mixing was succesfully recompiled to the original version.")
-    print("Don't forget to run ./clean and ./mk in your work directory.")
-    print("-" * 80)
-
-elif args.command == "soft_reinstall":
-
-    # uninstall all the files in the install_info dictionary
-    for key, value in install_info.items():
-        file = InstallationFile(key, value["replace"], value["mesa_path"])
-        file.uninstall()
-    
-    # install all the files in the install_info dictionary
-    for key, value in install_info.items():
-        file = InstallationFile(key, value["replace"], value["mesa_path"])
-        file.install()
-
-    # ask the user if they want to clean the mesa dirs
-    clean: bool = (
-        input("Do you want to clean the mesa directories? (y/n): ").lower() == "y"
-    )
-
-    if clean:
-
-        # execute ./clean and ./mk in the $MESA_DIR/eos directory
-        os.system("cd $MESA_DIR/eos; ./clean; ./mk; ./export")
-
-        # execute ./clean and ./mk in the $MESA_DIR/star_data directory
-        os.system("cd $MESA_DIR/star_data; ./clean; ./mk; ./export")
-
-        # execute ./clean and ./mk in the $MESA_DIR/star directory
-        os.system("cd $MESA_DIR/star; ./clean; ./mk; ./export")
+        print(f"backup dir:     {BACKUP_DIR} (absent)")
+    print()
+    print("patched MESA files:")
+    n_patched = 0
+    n_stale = 0
+    n_unknown = 0
+    version_mismatch = []
+    files = all_files()
+    for f in files:
+        if f.replace:
+            continue
+        patched = f.is_patched()
+        n_patched += patched
+        state = "pristine"
+        if patched:
+            current = f.is_up_to_date()
+            if current is None:
+                n_unknown += 1
+                state = "patched (no pristine backup)"
+            elif current:
+                state = "patched (up to date)"
+            else:
+                n_stale += 1
+                state = "patched (STALE)"
+        if f.has_backup():
+            backed = f.backup_version()
+            backup_info = f"backup from {backed or 'unknown MESA'}"
+            if backed != current_version:
+                version_mismatch.append(f.name)
+        else:
+            backup_info = "no backup"
+        print(f"   {str(f.mesa_subdir / f.name):40s} {state:28s} {backup_info}")
+    print()
+    print(f"new sources in {mesa_dir() / 'star' / 'private'}:")
+    n_present = 0
+    for f in files:
+        if not f.replace:
+            continue
+        present = f.is_patched()
+        n_present += present
+        state = "missing"
+        if present:
+            current = f.is_up_to_date()
+            n_stale += not current
+            state = "present (up to date)" if current else "present (STALE)"
+        print(f"   {f.name:40s} {state}")
+    n_patch_files = sum(1 for f in files if not f.replace)
+    print()
+    if n_patched == 0 and n_present == 0:
+        print("status: not installed")
+    elif n_patched == n_patch_files and n_present == len(NEW_SOURCES):
+        if n_unknown > 0:
+            print(f"status: installed, but {n_unknown} patched file(s) have no pristine backup in "
+                  f"{BACKUP_DIR}; they cannot be verified, updated or uninstalled. Restore them from a "
+                  "fresh MESA download, then run install.")
+        elif n_stale == 0:
+            print("status: installed and up to date with code/")
+        else:
+            print(f"status: installed but {n_stale} file(s) differ from code/ -- run "
+                  "'python3 setup.py soft_install' to update MESA")
     else:
+        print("status: PARTIALLY installed -- run 'python3 setup.py soft_install' or 'uninstall'")
+    if version_mismatch:
+        print(f"WARNING: backups not recorded as taken from MESA {current_version}: {', '.join(version_mismatch)}")
+    return 0
 
-        # execute ./mk in the $MESA_DIR/eos directory
-        os.system("cd $MESA_DIR/eos; ./mk; ./export")
 
-        # execute ./mk in the $MESA_DIR/star_data directory
-        os.system("cd $MESA_DIR/star_data; ./mk; ./export")
+def cmd_check(args) -> int:
+    """Dry run of the anchor parser against the pristine MESA files; returns the exit status."""
+    print(f"MESA_DIR: {mesa_dir()} (version {mesa_version()})")
+    problems: list[str] = []
+    missing = [name for name in INSTALL_INFO if not (CODE_DIR / name).is_file()]
+    for name in missing:
+        problems.append(f"{CODE_DIR / name} is missing")
+    for name in INSTALL_INFO:
+        if name in missing:
+            continue
+        try:
+            f = InstallationFile(name)
+        except SetupError as exc:
+            problems.append(str(exc))
+            continue
+        if f.replace:
+            print(f"   {name:28s} new source, {f.code_path.stat().st_size} bytes")
+            continue
+        file_problems = f.check()
+        snippets = parse_snippet_file(f.code_path) if not file_problems else []
+        source = "MESA file" if not is_patched_text(f.mesa_file.read_text()) else "backup"
+        state = "OK" if not file_problems else "FAILED"
+        print(f"   {name:28s} {len(snippets):2d} anchor(s) checked against the {source}: {state}")
+        problems.extend(file_problems)
+    problems.extend(check_control_consistency())
+    print()
+    if problems:
+        print("check FAILED:")
+        for p in problems:
+            print(f"   - {p}")
+        return 1
+    print("check passed: every anchor was found, every snippet applies cleanly, "
+          "and the controls are consistent")
+    return 0
 
-        # execute ./mk in the $MESA_DIR/star directory
-        os.system("cd $MESA_DIR/star; ./mk; ./export")
 
-    # remind the user to run ./clean and ./mk in their work directory
-    print("-" * 80)
-    print("Gentle mixing was succesfully recompiled to the original version.")
-    print("Don't forget to run ./clean and ./mk in your work directory.")
-    print("-" * 80)
+def check_control_consistency() -> list[str]:
+    """Every control declared in star_controls.inc must be initialized in controls.defaults
+    and appear in the namelist, the 's% x = x' and the 'x = s% x' blocks of ctrls_io.f90
+    (MESA includes controls.defaults at compile time, so a missing initializer leaves the
+    control undefined without any compiler diagnostic)."""
+    problems: list[str] = []
+    try:
+        decl = (CODE_DIR / "star_controls.inc").read_text()
+        defaults = (CODE_DIR / "controls.defaults").read_text()
+        io = (CODE_DIR / "ctrls_io.f90").read_text()
+    except OSError as exc:
+        return [f"cannot read the control snippets: {exc}"]
+    names: list[str] = []
+    joined = ""
+    for raw in decl.splitlines():
+        if raw.startswith("! anchor ="):
+            continue
+        line = raw.split("!", 1)[0].rstrip()  # no strings in declarations, so '!' starts a comment
+        if not line.strip():
+            continue
+        joined += line.strip()
+        if joined.endswith("&"):  # continuation line
+            joined = joined[:-1] + " "
+            continue
+        stmt, joined = joined, ""
+        if "::" not in stmt:
+            problems.append(f"star_controls.inc: cannot parse declaration {stmt!r}")
+            continue
+        for item in stmt.split("::", 1)[1].split(","):
+            match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", item)
+            if match is None:
+                problems.append(f"star_controls.inc: cannot parse declaration {stmt!r}")
+                break
+            names.append(match.group(1))
+    if not names:
+        return problems + ["no control declarations found in star_controls.inc"]
+    for name in names:
+        if not re.search(rf"^\s*{name}\s*=", defaults, flags=re.M):
+            problems.append(f"control {name} is declared in star_controls.inc but not initialized in controls.defaults")
+        if not re.search(rf"^\s*{name},\s*&", io, flags=re.M):
+            problems.append(f"control {name} is missing from the namelist block of ctrls_io.f90")
+        if not re.search(rf"^\s*s%\s*{name}\s*=\s*{name}\s*$", io, flags=re.M):
+            problems.append(f"control {name} is missing from the 's% x = x' block of ctrls_io.f90")
+        if not re.search(rf"^\s*{name}\s*=\s*s%\s*{name}\s*$", io, flags=re.M):
+            problems.append(f"control {name} is missing from the 'x = s% x' block of ctrls_io.f90")
+    for name in re.findall(r"^\s*(element_sedimentation_\w+|do_element_sedimentation)\s*=", defaults, flags=re.M):
+        if name not in names:
+            problems.append(f"control {name} is initialized in controls.defaults but not declared in star_controls.inc")
+    print(f"   {len(names)} controls checked for consistency across star_controls.inc, controls.defaults and ctrls_io.f90")
+    return problems
 
-elif args.command == "single_install":
-    # install a single file
-    # get filename from -f argument or ask user
-    if args.filename:
-        file_name = args.filename
-    else:
-        file_name = input("Enter the file name: ")
-    file = InstallationFile(
-        file_name,
-        install_info[file_name]["replace"],
-        install_info[file_name]["mesa_path"],
+
+def cmd_clean(args) -> None:
+    if not BACKUP_DIR.is_dir():
+        print(f"{BACKUP_DIR} does not exist, nothing to clean")
+        return
+    patched = [f.name for f in all_files() if not f.replace and f.is_patched()]
+    if patched and not args.force:
+        raise SetupError(
+            f"MESA is still patched ({', '.join(patched)}); uninstall first, or use --force to "
+            "delete the backups anyway"
+        )
+    if not confirm(f"Delete {BACKUP_DIR}?", args.yes):
+        raise SetupError("aborted")
+    shutil.rmtree(BACKUP_DIR)
+    print(f"removed {BACKUP_DIR}")
+
+
+COMMANDS = {
+    "install": cmd_install,
+    "uninstall": cmd_uninstall,
+    "reinstall": cmd_reinstall,
+    "clean": cmd_clean,
+    "soft_install": cmd_soft_install,
+    "soft_uninstall": cmd_uninstall,
+    "soft_reinstall": cmd_soft_reinstall,
+    "single_install": cmd_single_install,
+    "single_uninstall": cmd_single_uninstall,
+    "single_reinstall": cmd_single_reinstall,
+    "status": cmd_status,
+    "check": cmd_check,
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Install or uninstall the element_sedimentation extension in $MESA_DIR.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__.split("Commands:", 1)[1],
     )
-    file.install()
+    parser.add_argument("command", choices=list(COMMANDS), help="the command to execute")
+    parser.add_argument("-f", "--filename", help="file name for the single_* commands")
+    parser.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    parser.add_argument("--no-build", action="store_true", help="patch/restore only, do not build")
+    parser.add_argument("--force", action="store_true",
+                        help="ignore the MESA version check of the backups; allow clean while patched")
+    parser.add_argument("-v", "--verbose", action="store_true", help="more output")
+    parser.add_argument("--mesa-dir", help="MESA installation to use instead of $MESA_DIR")
+    return parser
 
-    # execute ./mk and ./export in the relevant directory
-    os.system(f"cd {file.module_path}; ./mk; ./export")
 
-    # remind the user to run ./clean and ./mk in their work directory
-    print("-" * 80)
-    print(f"{file_name} was succesfully installed.")
-    print("Don't forget to run ./clean and ./mk in your work directory.")
-    print("-" * 80)
+def main(argv: list[str] | None = None) -> int:
+    global VERBOSE, _MESA_DIR_OVERRIDE
+    sys.stdout.reconfigure(line_buffering=True)  # keep progress and error messages in order
+    args = build_parser().parse_args(argv)
+    VERBOSE = args.verbose
+    if args.mesa_dir:
+        _MESA_DIR_OVERRIDE = Path(args.mesa_dir).expanduser().resolve()
+    try:
+        if not CODE_DIR.is_dir():
+            raise SetupError(f"{CODE_DIR} not found")
+        result = COMMANDS[args.command](args)
+    except SetupError as exc:
+        print(f"setup.py {args.command}: error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+    return int(result or 0)
 
-elif args.command == "single_uninstall":
-    # uninstall a single file
-    # get filename from -f argument or ask user
-    if args.filename:
-        file_name = args.filename
-    else:
-        file_name = input("Enter the file name: ")
-    file = InstallationFile(
-        file_name,
-        install_info[file_name]["replace"],
-        install_info[file_name]["mesa_path"],
-    )
-    file.uninstall()
 
-    # execute ./mk and ./export in the relevant directory
-    os.system(f"cd {file.module_path}; ./mk; ./export")
-
-    # remind the user to run ./clean and ./mk in their work directory
-    print("-" * 80)
-    print(f"{file_name} was succesfully uninstalled.")
-    print("Don't forget to run ./clean and ./mk in your work directory.")
-    print("-" * 80)
-
-elif args.command == "single_reinstall":
-    # ask the user for the file name
-    # first, restore the original file
-    if args.filename:
-        file_name = args.filename
-    else:
-        file_name = input("Enter the file name: ")
-
-    file = InstallationFile(
-        file_name,
-        install_info[file_name]["replace"],
-        install_info[file_name]["mesa_path"],
-    )
-    file.uninstall()
-
-    # install the new file
-    file.install()
-
-    # execute ./mk and ./export in the relevant directory
-    os.system(f"cd {file.module_path}; ./mk; ./export")
-
-    # remind the user to run ./clean and ./mk in their work directory
-    print("-" * 80)
-    print(f"{file_name} was succesfully reinstalled.")
-    print("Don't forget to run ./clean and ./mk in your work directory.")
-    print("-" * 80)
-
-elif args.command == "clean":
-    # remove the backup directory
-    shutil.rmtree(backup_dir)
-    print(f"Removed {backup_dir}.") if verbose else None
-
-else:
-    raise ValueError("Invalid command.")
+if __name__ == "__main__":
+    sys.exit(main())
