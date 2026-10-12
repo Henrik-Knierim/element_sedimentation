@@ -44,3 +44,10 @@ restart_photo
 *.yml
 .DS_Store
 element_sedimentation/backup/
+
+# element_sedimentation unit-test binary
+element_sedimentation/test/tester
+__pycache__/
+
+# verification movies (not part of the repository)
+movies/
