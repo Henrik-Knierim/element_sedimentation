@@ -1,119 +1,268 @@
 ! anchor = 'phase_separation_mixing_use_brunt = .true.'
 
-! Element Sedimentation
-! ===================
+
+! element sedimentation
+! =====================
+
+      ! Sedimentation ("rain") of a chemical species that becomes immiscible in the
+      ! surrounding mixture, e.g. helium rain in giant planets. This is an extension
+      ! and not part of the official MESA release.
+
+      ! The sedimenting species is transported by a conservative advection-diffusion
+      ! equation in the Lagrangian mass coordinate: convective mixing (MESA's ``D_mix``)
+      ! acts as diffusion and rain as advection with velocity
+      ! ``element_sedimentation_velocity``. In every cell whose (P, T) lie inside the
+      ! immiscibility region of the phase diagram only the part of the species above
+      ! the He-poor limit rains out, and inflow stops once the cell reaches the He-rich
+      ! limit, so a species-rich layer grows upward from the centre. All other species
+      ! are moved by the displaced counter-flow, which keeps the mass fractions summing
+      ! to one and conserves the total mass of every species.
 
       ! do_element_sedimentation
-      ! ~~~~~~~~~~~~~~
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! Turn on sedimentation of elements in the model; primarily used for helium rain.
+      ! Turn on element sedimentation. Requires ``element_sedimentation_phase_diagram``.
 
       ! ::
 
     do_element_sedimentation = .false.
 
       ! element_sedimentation_method
-      ! ~~~~~~~~~~~~~~
-      
-      ! Method to use for the mass transfer of the helium rain.
-      ! Options are 'instant_rain', 'bottom_up_rain', and 'advection_diffusion_rain' (in increasing order of complexity).
-      ! 'instant_rain' will transfer all the rain mass at once, updating the model afterwards.
-      ! 'bottom_up_rain' will transfer the rain cell by cell from the bottom up, adjusting the model as it goes.
-      ! 'advection_diffusion_rain' runs a full advection-diffusion solver until a steady state between advecting rain and diffusing convection is reached.
-      
-      ! ::
-    
-    element_sedimentation_method = 'instant_rain'
-    
-      ! element_sedimentation_velocity_method
-      ! ~~~~~~~~~~~~~~
-      
-      ! The method to use for determining the sedimentation velocity of the element. Only applies to 'advection_diffusion_rain'.
-      ! Currently, only 'constant' is supported.
-      
-      ! ::
-    
-    element_sedimentation_velocity_method = 'constant'
-    
-      ! element_sedimentation_velocity
-      ! ~~~~~~~~~~~~~~
-      
-      ! Sedimentation velocity of the element droplets in cm/s. Only applies to 'advection_diffusion_rain'.
-      
-      ! ::
-    
-    element_sedimentation_velocity = 1d2
-    
-      ! element_sedimentation_advection_diffusion_time_step_factor
-      ! ~~~~~~~~~~~~~~
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! The time step for the advection-diffusion solver is determined as a fraction of the advection/diffusion time scale.
-      ! element_sedimentation_advection_diffusion_time_step_factor is the factor that is multiplied with the advection/diffusion time scale to determine the time step.
-      ! Only applies to 'advection_diffusion_rain'.
+      ! Algorithm for the mass transfer:
 
-      ! ::
-  
-    element_sedimentation_advection_diffusion_time_step_factor = 0.5d0
-
-      ! element_sedimentation_maximum_dXi_per_cell
-      ! ~~~~~~~~~~~~~~
-
-      ! Maximum allowed absolute change in the abundance of the sedimenting species per cell during an evolution step.
-      ! Can help with convergence if too much material is raining out at once.
-      ! Negative values will disable this limit.
+      ! + ``'advection_diffusion_rain'`` : implicit advection-diffusion solver with the
+      !   miscibility limits as floor and cap (recommended).
+      ! + ``'instant_rain'`` : legacy; transfers all the rain mass at once.
+      ! + ``'bottom_up_rain'`` : legacy; transfers the rain cell by cell from the bottom up.
 
       ! ::
 
-    element_sedimentation_maximum_dXi_per_cell = -1d0
+    element_sedimentation_method = 'advection_diffusion_rain'
+
+      ! element_sedimentation_chemical_species
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Isotope that sediments (must be in the nuclear net).
+
+      ! ::
+
+    element_sedimentation_chemical_species = 'he4'
+
+      ! element_sedimentation_partner_species
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Second component of the two-component phase diagram (must be in the nuclear net).
+      ! The phase diagram is tabulated in the number fraction of the sedimenting species
+      ! within this pair; all other species are carried along without entering it.
+
+      ! ::
+
+    element_sedimentation_partner_species = 'h1'
 
       ! element_sedimentation_phase_diagram
-      ! ~~~~~~~~~~~~~~
-      
-      ! Path to the phase diagram file for the sedimenting chemical species. The file should be a CSV file with the following columns:
-      ! One header line with the column names (lower miscibility limit, upper miscibility limit, temperature (K), pressure (Mbar)).
-      ! Followed by the data lines (comma separeted) with the values for each column.
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Path to the phase diagram file (CSV). One header line, then rows
+      ! ``y_lo, y_hi, T [K], P [Mbar]`` with ``y_lo`` the He-poor and ``y_hi`` the He-rich
+      ! number-fraction limit of the sedimenting species in the two-component subsystem.
+      ! Rows are grouped in blocks of constant P with T strictly increasing inside a
+      ! block and P strictly increasing between blocks.
 
       ! ::
 
     element_sedimentation_phase_diagram = ''
 
       ! element_sedimentation_phase_diagram_temperature_shift
-      ! ~~~~~~~~~~~~~~
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! Temperature shift to apply to the phase diagram in Kelvin.
-      ! This can be used to account for uncertainties in the phase diagram.
+      ! Shift (K) added to the temperatures of the phase diagram, e.g. to account for
+      ! uncertainties in the demixing temperature.
 
       ! ::
 
     element_sedimentation_phase_diagram_temperature_shift = 0d0
 
-
       ! element_sedimentation_extrapolate_phase_diagram
-      ! ~~~~~~~~~~~~~~
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! If true, the phase diagram will be (linearly) extrapolated in temperature outside of the range of the phase diagram.
-    
+      ! If true, the miscibility limits are extrapolated linearly in temperature above
+      ! the tabulated range (and clamped to [0,1]); otherwise such cells are treated as
+      ! miscible.
+
       ! ::
 
     element_sedimentation_extrapolate_phase_diagram = .false.
 
-    
-      ! element_sedimentation_chemical_species
-      ! ~~~~~~~~~~~~~~
+      ! element_sedimentation_velocity_method
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! Chemical species to use for the sedimentation. This should be the name of the element in the phase diagram file.
-      ! The default is 'he4' for helium rain, but can be changed to other elements if needed.
+      ! How the sedimentation velocity of the droplets is determined.
+      ! Only ``'constant'`` (``element_sedimentation_velocity`` everywhere) is implemented.
 
       ! ::
 
-    element_sedimentation_chemical_species = 'he4'
+    element_sedimentation_velocity_method = 'constant'
+
+      ! element_sedimentation_velocity
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Sedimentation velocity of the droplets (cm/s). Positive values sink toward the
+      ! centre. The carrier mass flow rate through a face is ``4 pi r^2 rho v``.
+
+      ! ::
+
+    element_sedimentation_velocity = 1d2
+
+      ! element_sedimentation_D_mix_factor
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Factor multiplying MESA's ``D_mix`` in the diffusive part of the transport.
+      ! The conductance is built from ``D_mix`` exactly like MESA's ``sig``, but without
+      ! ``mix_factor``: setting ``mix_factor = 0`` (MESA does not mix the composition)
+      ! leaves the convective mixing of the sedimenting species and of the displaced
+      ! mixture to this module, which is how ``planet_helium_rain`` is set up.
+
+      ! ::
+
+    element_sedimentation_D_mix_factor = 1d0
+
+      ! element_sedimentation_cap_width
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Absolute width (in mass fraction) of the ramp below the He-rich limit over which
+      ! the inflow of rain into a cell is throttled to zero.
+
+      ! ::
+
+    element_sedimentation_cap_width = 1d-3
+
+      ! element_sedimentation_solve_to_steady_state
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! If true, the transport is integrated to its steady state in every step
+      ! (pseudo-transient continuation), i.e. rain and convective mixing are assumed to be
+      ! fast compared to the evolution. If false, it is integrated for the physical time
+      ! step ``dt`` only; the integration ends early once the profile is steady (the
+      ! coefficients are frozen during the step), so for MESA time steps much longer than
+      ! the rain and mixing timescales both settings give the same result.
+
+      ! ::
+
+    element_sedimentation_solve_to_steady_state = .true.
+
+      ! element_sedimentation_steady_state_tolerance
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! The steady state is reached when the dimensionless residual
+      ! ``max_k |dX_k| / dt * tau_max`` drops below this value (``tau_max`` is the longest
+      ! face timescale of the problem). Smaller values follow slow modes further.
+
+      ! ::
+
+    element_sedimentation_steady_state_tolerance = 1d-8
+
+      ! element_sedimentation_max_steps
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Maximum number of implicit steps of the transport solver per MESA step.
+      ! Exceeding it is an error (the MESA step is retried).
+
+      ! ::
+
+    element_sedimentation_max_steps = 1000
+
+      ! element_sedimentation_advection_diffusion_time_step_factor
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! First (pseudo-)time step of the transport solver as a fraction of the shortest
+      ! face timescale ``min_k dm_k / (sig_k + |w_k|)``. Later steps grow geometrically.
+
+      ! ::
+
+    element_sedimentation_advection_diffusion_time_step_factor = 0.5d0
+
+      ! element_sedimentation_maximum_dXi_per_cell
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Maximum change of the mass fraction of the sedimenting species in any cell in one
+      ! MESA step. The transport is solved as usual; if the result changes some cell by more
+      ! than this, the composition change of the step is scaled down for all species,
+      ! ``xa = xa_start + f*(xa_new - xa_start)`` with ``f = limit/(largest change)``, so
+      ! that the largest change equals the limit. The scaled state still conserves every
+      ! species, sums to one and keeps uniform convective regions uniform; the remaining
+      ! rain happens in the following steps. This can help convergence when a lot of
+      ! material rains out at once. Negative values disable the limit.
+
+      ! ::
+
+    element_sedimentation_maximum_dXi_per_cell = -1d0
+
+      ! element_sedimentation_retry_change_factor
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! When MESA retries a step (same model number, smaller time step) after the
+      ! sedimenting species was transported, the steady-state result would be identical
+      ! on every retry because it does not depend on the time step; the structure solver
+      ! then fails again until the minimum time step is reached. If this factor is > 0,
+      ! every retry of a model limits the largest change per cell to this factor times the
+      ! largest change applied in the previous attempt, in the same way as
+      ! ``element_sedimentation_maximum_dXi_per_cell`` (compounding with each further
+      ! retry, and never above that limit when it is set). The material that did not rain
+      ! out in this step rains out in the following steps. A notice is printed whenever
+      ! the limit is applied. Values <= 0 disable this.
+
+      ! ::
+
+    element_sedimentation_retry_change_factor = 0.5d0
 
       ! element_sedimentation_cell_threshold_for_precipitation
-      ! ~~~~~~~~~~~~~~
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! Minimum number of cells that should be precipitating for the sedimentation to be applied. 
-      ! Can help with convergence if only a few cells are precipitating.
+      ! Minimum number of cells inside the immiscibility gap for sedimentation to be
+      ! applied (at least one cell is always required).
 
       ! ::
 
     element_sedimentation_cell_threshold_for_precipitation = 1
+
+      ! element_sedimentation_suppress_mixing_in_immiscible_regions
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! If true, MESA's mixing coefficients (``D_mix`` and ``sig``) are set to zero on
+      ! both faces of every cell that was inside the immiscibility gap before the
+      ! transport, for the rest of the step. Also sets ``do_conv_premix = .false.``.
+      ! Only used by ``'advection_diffusion_rain'``. The legacy methods ignore it:
+      ! ``'instant_rain'`` always sets ``D_mix = 0`` in the immiscible cells and switches
+      ! off ``do_conv_premix``; ``'bottom_up_rain'`` never changes the mixing.
+
+      ! ::
+
+    element_sedimentation_suppress_mixing_in_immiscible_regions = .false.
+
+      ! element_sedimentation_heating
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! If true, the change of internal energy caused by the composition changes of the
+      ! sedimentation is included as a heating term in the energy equation (like
+      ! ``do_phase_separation_heating``). As for phase separation, the term is always part
+      ! of MESA's total-energy bookkeeping, so switching it off makes the reported energy
+      ! conservation error reflect the omitted heating and will trigger
+      ! ``hard_limit_for_rel_error_in_energy_conservation`` retries unless that limit is
+      ! relaxed; use ``.false.`` only for experiments.
+
+      ! ::
+
+    element_sedimentation_heating = .true.
+
+      ! element_sedimentation_report
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! If true, print a summary line per step and one line per implicit step of the
+      ! transport solver.
+
+      ! ::
+
+    element_sedimentation_report = .false.
+
