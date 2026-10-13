@@ -45,6 +45,22 @@
       interface should stay stratified (thermohaline instead of full convective remixing
       of a stabilizing helium gradient). The remixing hands the whole deposit back to the
       envelope, so by 5 Gyr the planet has rained out only ~0.7 % of its helium net.
+- [ ] Long run (20 Gyr requested, `dedt`, committed defaults, 2026-10-13): the planet rains
+      from 4.75 Gyr on, Y_env 0.2765 -> 0.143 at 11.6 Gyr, where the CMS EOS failure of the
+      first item ends the run (`store_eos_for_cell` for the He-poor envelope cells). The
+      released gravitational energy (W - W_base = -1.1e41 erg) is stored below a single
+      radiative boundary-layer cell at 0.84 M_J (gradT = gradr ~ 2.3, L through it 0.65 of
+      the surface value): the interior at 0.4-0.84 M_J is ~1000 K warmer than the no-rain
+      planet, the inner 0.4 M_J becomes thermally stable and its centre ~230 K cooler, the
+      envelope ~150-290 K cooler. L/L_base falls to 0.86 at 7 Gyr (T_eff -3.3 K) and climbs
+      back to 1.00-1.01 at 11.5 Gyr: the time-integrated luminosity deficit, 2e40 erg, equals
+      the stored (U + W) - base and stops growing there, i.e. the excess luminosity of the
+      Stevenson & Salpeter / Fortney & Hubbard picture only begins ~7 Gyr after onset in this
+      model, because the barrier is a radiative layer with no thermohaline/ODDC transport.
+      Needed to continue: the EOS blend for He-poor cells (first item) and the barrier
+      transport (item above). The `eps_grav` form is not usable for this experiment: its
+      cumulative energy error (2.4e-3 of the total energy, ~2e40 erg) is as large as the
+      stored energy, and its centre ends 1300 K warmer instead of 230 K cooler.
 - [ ] The radiative atmosphere above the convective envelope keeps its initial helium
       while the envelope below drains (a heavier layer on top of a lighter one, with a
       stable thermal stratification: thermohaline regime, so the overturn leaves it to
