@@ -2,5 +2,7 @@
    advection_diffusion.f90 \
    sedimentation_phase_diagram.f90 \
    sedimentation_miscibility.f90 \
+   sedimentation_energy.f90 \
+  sedimentation_overturn.f90 \
    element_sedimentation_legacy.f90 \
    element_sedimentation.f90 \

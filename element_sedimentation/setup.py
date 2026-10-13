@@ -58,6 +58,8 @@ NEW_SOURCES = (
     "advection_diffusion.f90",
     "sedimentation_phase_diagram.f90",
     "sedimentation_miscibility.f90",
+    "sedimentation_energy.f90",
+    "sedimentation_overturn.f90",
     "element_sedimentation_legacy.f90",
     "element_sedimentation.f90",
 )
@@ -423,6 +425,11 @@ def run(cmd: list[str], cwd: Path) -> None:
 
     MESA's scripts are not all executable with a shebang line (e.g. star_data/clean
     is a plain list of shell commands), so they are always run through bash.
+
+    MESA's ./install also runs the test program of every module; some of them (colors)
+    crash with the default OpenMP thread stack on macOS, and a failed ./install leaves
+    the tree without libraries. OMP_STACKSIZE is therefore set for the build scripts
+    unless the environment already defines it.
     """
     print(f"$ (cd {cwd} && {' '.join(cmd)})")
     script = cwd / cmd[0]
@@ -430,6 +437,7 @@ def run(cmd: list[str], cwd: Path) -> None:
         raise SetupError(f"cannot run {cmd[0]} in {cwd}: no such file")
     env = dict(os.environ)
     env["MESA_DIR"] = str(mesa_dir())  # --mesa-dir must also apply to MESA's build scripts
+    env.setdefault("OMP_STACKSIZE", "512m")
     try:
         subprocess.run(["bash", str(script)] + cmd[1:], cwd=cwd, check=True, env=env)
     except OSError as exc:

@@ -29,31 +29,42 @@ module element_sedimentation
    !
    ! The numerics live in advection_diffusion (no MESA dependency), the phase
    ! diagram in sedimentation_phase_diagram, and the composition arithmetic in
-   ! sedimentation_miscibility. The old instant_rain and bottom_up_rain
+   ! sedimentation_miscibility. Layers that the transport leaves convectively
+   ! unstable (a heavy deposit on top of cells that were not mixed at the start
+   ! of the step) are mixed at once by sedimentation_overturn with the Ledoux
+   ! criterion evaluated here. The old instant_rain and bottom_up_rain
    ! algorithms are kept in element_sedimentation_legacy.
    !
    ! Called from evolve.f90 after the mixing information of the step has been
-   ! set (okay_to_set_mixing_info = .false.); the evolve.f90 snippet installed
-   ! by setup.py records energy_start before the call and computes
-   ! eps_element_sedimentation from the energy change afterwards, exactly like
-   ! MESA's element_diffusion.
+   ! set (okay_to_set_mixing_info = .false.). The evolve.f90 snippet installed
+   ! by setup.py records energy_start before the call, re-evaluates the EOS with
+   ! the new composition afterwards (set_vars) and then calls
+   ! finish_element_sedimentation, which sets eps_element_sedimentation for the
+   ! energy equation: the change of the internal energy at fixed (rho, T),
+   ! exactly like MESA's element_diffusion, plus the divergence of the enthalpy
+   ! flux carried by the moved species (sedimentation_energy).
 
    use star_private_def
-   use const_def, only: dp, pi4
+   use const_def, only: dp, pi4, ln10, crad, boltzm, mp
    use utils_lib, only: is_bad
    use chem_def, only: chem_isos
    use chem_lib, only: chem_get_iso_id
+   use eos_def, only: num_eos_basic_results, num_eos_d_dxa_results, i_lnE, i_lnPgas
+   use eos_support, only: get_eos
    use advection_diffusion
    use sedimentation_phase_diagram, only: phase_diagram, load_phase_diagram, free_phase_diagram, &
       phase_diagram_error_message
    use sedimentation_miscibility, only: evaluate_miscibility, miscibility_error_message
+   use sedimentation_energy, only: species_face_flow_rates, face_energy_flux, &
+      flux_divergence_heating, partial_enthalpy_increment
+   use sedimentation_overturn, only: overturn_unstable_layers
    use element_sedimentation_legacy, only: init_element_sedimentation_legacy, &
       shutdown_element_sedimentation_legacy, do_instant_rain, do_bottom_up_rain
 
    implicit none
 
    private
-   public :: do_element_sedimentation, shutdown_element_sedimentation
+   public :: do_element_sedimentation, finish_element_sedimentation, shutdown_element_sedimentation
 
    character(len=*), parameter :: method_advection_diffusion = 'advection_diffusion_rain'
    character(len=*), parameter :: method_instant = 'instant_rain'
@@ -65,6 +76,12 @@ module element_sedimentation
    real(dp), parameter :: species_mass_rtol = 1d-8     ! error when the total mass of a species changes by more
    real(dp), parameter :: min_one_minus_x = 1d-30      ! floor of (1 - x_i) in the passive counter-flow scale
    real(dp), parameter :: passive_sum_error_tol = 1d-3 ! error when the passive species miss 1 - x_i by more after a step
+   real(dp), parameter :: saturation_tol = 1d-10       ! a cell counts as saturated if x_i >= x_lo - saturation_tol
+   ! finite differences of the EOS for the partial specific enthalpies (enthalpy_flux_heating)
+   real(dp), parameter :: dxa_eos = 1d-3      ! composition step
+   real(dp), parameter :: dxa_eos_min = 1d-6  ! below this abundance of both species the derivative is not needed
+   ! overturn of unstable layers: two blocks whose compositions agree to this are never tested
+   real(dp), parameter :: overturn_composition_tol = 1d-12
 
    ! module state: the phase diagram is loaded once per run (freed by shutdown);
    ! species indices and atomic weights are refreshed on every call (cheap, and
@@ -82,6 +99,11 @@ module element_sedimentation
    ! mass fraction of the sedimenting species in the last attempt and the model it belongs to
    integer :: last_attempt_model_number = -1
    real(dp) :: last_attempt_max_change = 0d0
+   ! energy carried by the moved species (element_sedimentation_include_enthalpy_flux):
+   ! heating rate of every cell from the divergence of the enthalpy flux of the last
+   ! call, added to eps_element_sedimentation by finish_element_sedimentation
+   real(dp), allocatable :: eps_enthalpy_flux(:)
+   logical :: enthalpy_flux_valid = .false.
 
 contains
 
@@ -95,8 +117,10 @@ contains
       type (star_info), pointer :: s
       real(dp), intent(in) :: dt
       integer, intent(out) :: ierr
+      real(dp), allocatable :: xa_entry(:,:)
 
       ierr = 0
+      enthalpy_flux_valid = .false.
 
       call initialize(s, ierr)
       if (ierr /= 0) then
@@ -105,6 +129,8 @@ contains
       end if
 
       s% eps_element_sedimentation(1:s% nz) = 0d0
+      allocate(xa_entry(s% species, s% nz))
+      xa_entry(1:s% species,1:s% nz) = s% xa(1:s% species,1:s% nz)
 
       select case (trim(s% element_sedimentation_method))
       case (method_advection_diffusion)
@@ -122,10 +148,46 @@ contains
          write(*,'(a)') '    valid options are ''' // method_advection_diffusion // ''' (default), ''' // &
             method_instant // ''' and ''' // method_bottom_up // ''' (legacy)'
       end select
+      if (ierr /= 0) return
+
+      ! energy carried by the moved species, from the composition change of the step
+      ! (any method)
+      if (s% element_sedimentation_include_enthalpy_flux) then
+         call enthalpy_flux_heating(s, dt, xa_entry, ierr)
+         if (ierr /= 0) then
+            write(*,'(a)') ' element_sedimentation: enthalpy flux of the moved species failed; see the messages above'
+            s% xa(1:s% species,1:s% nz) = xa_entry(1:s% species,1:s% nz)
+            return
+         end if
+      end if
 
       s% need_to_setvars = .true.
 
    end subroutine do_element_sedimentation
+
+
+   subroutine finish_element_sedimentation(s, dt)
+      ! eps_element_sedimentation for the energy equation; called from evolve.f90 after
+      ! set_vars has re-evaluated the EOS with the new composition. Like MESA's
+      ! finish_element_diffusion: the change of the specific internal energy at fixed
+      ! (rho, T) (energy_start was recorded before the composition change), so that
+      ! every cell keeps its internal energy while its composition changes and the
+      ! total energy is conserved. On top of that, when
+      ! element_sedimentation_include_enthalpy_flux is true, the divergence of the
+      ! enthalpy flux of the moved species (see sedimentation_energy), which redistributes
+      ! energy between the cells and sums to zero over the star.
+      type (star_info), pointer :: s
+      real(dp), intent(in) :: dt
+      integer :: k
+      do k = 1, s% nz
+         s% eps_element_sedimentation(k) = (s% energy_start(k) - s% energy(k))/dt
+      end do
+      if (enthalpy_flux_valid) then
+         do k = 1, s% nz
+            s% eps_element_sedimentation(k) = s% eps_element_sedimentation(k) + eps_enthalpy_flux(k)
+         end do
+      end if
+   end subroutine finish_element_sedimentation
 
 
    subroutine shutdown_element_sedimentation()
@@ -133,6 +195,8 @@ contains
       call shutdown_element_sedimentation_legacy()
       call free_phase_diagram(pd)
       if (allocated(A)) deallocate(A)
+      if (allocated(eps_enthalpy_flux)) deallocate(eps_enthalpy_flux)
+      enthalpy_flux_valid = .false.
       i_sed = 0
       i_partner = 0
       legacy_i_sed = 0
@@ -278,15 +342,18 @@ contains
       real(dp), intent(in) :: dt
       integer, intent(out) :: ierr
 
-      integer :: nz, species, nvar, k, j, jj, donor, n_gap, k_first, k_last, num_renormalized
+      integer :: nz, species, nvar, k, j, jj, donor, n_gap, n_sat, k_first, k_last, num_renormalized, &
+         n_merged_faces, n_mixed_blocks, k_overturn_outer, k_overturn_inner, n_contrast
+      logical :: rain_active
       real(dp) :: total_time, v0, rho_face, area, f, xsum, dev, max_sum_dev, mass_end, rel, &
          max_species_dev, mass_moved, cons_err, max_passive_defect, change_limit, &
          max_change, damping
       logical, allocatable :: has_gap(:), in_gap(:)
-      real(dp), allocatable :: x_lo(:), x_hi(:), x(:), xa_start(:,:), mass_start(:), xp_old(:,:), xp_new(:,:)
-      type(adv_diff_problem) :: p, pp
+      real(dp), allocatable :: x_lo(:), x_hi(:), x(:), xa_start(:,:), xa_base(:,:), mass_start(:), &
+         xp_old(:,:), xp_new(:,:)
+      type(adv_diff_problem) :: p, pp, p_mix
       type(adv_diff_options) :: opts
-      type(adv_diff_stats) :: stats
+      type(adv_diff_stats) :: stats, stats_mix
       include 'formats'
 
       ierr = 0
@@ -304,24 +371,52 @@ contains
          return
       end if
 
+      ! cells inside the gap (strictly between the limits) and saturated cells (at or above
+      ! the He-poor limit, which includes the cells a previous step left exactly at their
+      ! limit). The module acts as long as some cell is saturated: otherwise a rain region
+      ! that sits at its limit would be handed back to MESA's mixing in the next step, be
+      ! homogenized, and rain again in the step after.
       n_gap = 0
+      n_sat = 0
       k_first = 0
       k_last = 0
       do k = 1, nz
-         if (in_gap(k)) then
-            n_gap = n_gap + 1
-            if (k_first == 0) k_first = k
-            k_last = k
+         if (in_gap(k)) n_gap = n_gap + 1
+         if (has_gap(k)) then
+            if (s% xa(i_sed,k) >= x_lo(k) - saturation_tol) then
+               n_sat = n_sat + 1
+               if (k_first == 0) k_first = k
+               k_last = k
+            end if
          end if
       end do
 
-      ! nothing can rain unless at least one cell is inside the gap (the threshold
-      ! control can only raise this minimum)
-      if (n_gap < max(1, s% element_sedimentation_cell_threshold_for_precipitation)) then
+      ! nothing can rain unless at least one cell is saturated (the threshold control can
+      ! only raise this minimum)
+      rain_active = (n_sat >= max(1, s% element_sedimentation_cell_threshold_for_precipitation))
+
+      ! Faces with mixing across which the species differs: MESA's mixing would change
+      ! the composition there, and MESA's mixing carries no enthalpy flux (every cell
+      ! keeps its internal energy while its composition changes). After rain the
+      ! species-poor envelope sits on the species-rich interior, and when MESA's
+      ! convection reaches through that interface the exchange is of the same kind as
+      ! the rain itself; so the module takes such steps over as well (mixing only, with
+      ! its energy terms), see element_sedimentation_act_on_mixing_contrast.
+      n_contrast = 0
+      if (s% element_sedimentation_act_on_mixing_contrast) then
+         do k = 2, nz
+            if (s% D_mix(k) <= 0d0) cycle
+            if (abs(s% xa(i_sed,k-1) - s% xa(i_sed,k)) > s% element_sedimentation_mixing_contrast_tolerance) &
+               n_contrast = n_contrast + 1
+         end do
+      end if
+
+      if (.not. rain_active .and. n_contrast == 0) then
          if (s% element_sedimentation_report) write(*,'(a,i0,a,i0,a,i0,a)') &
-            ' element_sedimentation: model ', s% model_number, ': ', n_gap, &
-            ' cells inside the miscibility gap (threshold ', &
-            max(1, s% element_sedimentation_cell_threshold_for_precipitation), '), nothing to do'
+            ' element_sedimentation: model ', s% model_number, ': ', n_sat, &
+            ' cells at or above the He-poor limit (threshold ', &
+            max(1, s% element_sedimentation_cell_threshold_for_precipitation), &
+            ') and no mixed face with a composition contrast, nothing to do'
          return
       end if
 
@@ -358,13 +453,14 @@ contains
          p% sig(k) = f*f*s% D_mix(k)*s% element_sedimentation_D_mix_factor/(0.5d0*(s% dm(k-1) + s% dm(k)))
          ! carrier mass flow rate; cells without a gap never rain (their floor is
          ! adv_diff_huge, so the flux would be zero anyway), hence such faces are
-         ! left inactive and do not enter the timescale bookkeeping of the solver
+         ! left inactive and do not enter the timescale bookkeeping of the solver.
+         ! In a mixing-only step (no saturated cell) nothing rains.
          if (v0 > 0d0) then
             donor = k - 1
          else
             donor = k
          end if
-         if (has_gap(donor)) p% w(k) = f*v0
+         if (rain_active .and. has_gap(donor)) p% w(k) = f*v0
       end do
       do k = 1, nz
          if (has_gap(k)) then
@@ -392,7 +488,7 @@ contains
       end if
 
       ! --- state at entry (restored on failure; reference for the conservation checks)
-      allocate(x(nz), xa_start(species,nz), mass_start(species), xp_old(nz,nvar), xp_new(nz,nvar))
+      allocate(x(nz), xa_start(species,nz), xa_base(species,nz), mass_start(species), xp_old(nz,nvar), xp_new(nz,nvar))
       xa_start(1:species,1:nz) = s% xa(1:species,1:nz)
       do j = 1, species
          mass_start(j) = dot_product(s% dm(1:nz), s% xa(j,1:nz))
@@ -411,8 +507,34 @@ contains
       pp% sig(1:nz+1) = p% sig(1:nz+1)
       max_passive_defect = 0d0
 
+      ! --- reference state of the damping: the same transport without rain (mixing only).
+      ! Only needed when a change limit applies. In mixed regions this is the homogenized
+      ! composition, in unmixed (e.g. radiative) cells the composition at the start.
+      xa_base(1:species,1:nz) = xa_start(1:species,1:nz)
+      if (change_limit > 0d0) then
+         call alloc_adv_diff_problem(p_mix, nz, ierr)
+         if (ierr /= 0) then
+            write(*,'(a)') ' element_sedimentation: alloc_adv_diff_problem failed (mixing-only problem)'
+            call cleanup()
+            return
+         end if
+         p_mix% dm(1:nz) = p% dm(1:nz)
+         p_mix% sig(1:nz+1) = p% sig(1:nz+1)
+         call adv_diff_integrate(p_mix, x, total_time, opts, stats_mix, ierr, after_step)
+         if (ierr /= 0) then
+            write(*,'(a)') ' element_sedimentation: mixing-only reference state for the damping failed'
+            call report_solver_failure(s, p_mix, x, stats_mix, ierr)
+            s% xa(1:species,1:nz) = xa_start(1:species,1:nz)
+            call cleanup()
+            return
+         end if
+         xa_base(1:species,1:nz) = s% xa(1:species,1:nz)
+         s% xa(1:species,1:nz) = xa_start(1:species,1:nz)
+         x(1:nz) = xa_start(i_sed,1:nz)
+      end if
+
       call adv_diff_integrate(p, x, total_time, opts, stats, ierr, after_step)
-      max_change = maxval(abs(x(1:nz) - xa_start(i_sed,1:nz)))
+      max_change = maxval(abs(x(1:nz) - xa_base(i_sed,1:nz)))
       last_attempt_model_number = s% model_number
       last_attempt_max_change = max_change
       if (ierr /= 0) then
@@ -423,20 +545,49 @@ contains
       end if
 
       ! --- damping (element_sedimentation_maximum_dXi_per_cell and the retry damping):
-      ! if the steady state changes the sedimenting species in some cell by more than
-      ! change_limit, move only part of the way towards it,
-      !    xa = xa_start + damping*(xa_steady - xa_start),  damping = change_limit/max_change,
-      ! for all species. A linear blend of two states that both conserve every species,
-      ! sum to one and are non-negative has the same properties, convective regions that
-      ! are uniform in both stay uniform, and the largest change equals change_limit
-      ! exactly. The rest of the rain happens in the following steps. (Stopping the
-      ! transport integration early, or raising floors, does not have these properties.)
+      ! if rain changes the sedimenting species in some cell by more than change_limit
+      ! relative to the mixing-only state xa_base, move only part of the way,
+      !    xa = xa_base + damping*(xa_rain - xa_base),  damping = change_limit/max_change,
+      ! for all species. This is a ceiling on the change caused by rain in every cell,
+      ! mixed or not (in unmixed cells xa_base is the composition at the start). A linear
+      ! blend of two states that both conserve every species, sum to one and are
+      ! non-negative has the same properties. Blending from the mixing-only state rather
+      ! than from the start keeps mixed regions mixed: a layer that was stable and has
+      ! become convective is homogenized as MESA's mixing would do, instead of keeping
+      ! a fraction of its old (possibly inverted) composition jump. The rest of the rain
+      ! happens in the following steps.
       damping = 1d0
       if (change_limit > 0d0 .and. max_change > change_limit) then
          damping = change_limit/max_change
-         s% xa(1:species,1:nz) = xa_start(1:species,1:nz) + &
-            damping*(s% xa(1:species,1:nz) - xa_start(1:species,1:nz))
+         s% xa(1:species,1:nz) = xa_base(1:species,1:nz) + &
+            damping*(s% xa(1:species,1:nz) - xa_base(1:species,1:nz))
          last_attempt_max_change = change_limit
+      end if
+
+      ! --- overturn of layers the transport left convectively unstable. The rain is
+      ! deposited below the immiscible region with the mixing of the start of the step;
+      ! where that mixing was zero (a layer that had become radiative) the deposit sits
+      ! as a heavier layer on top of lighter material. The mixing coefficients of this
+      ! step are fixed, so MESA could not mix it away before its convection treatment
+      ! reacts to the inverted composition gradient (gradT -> gradL < grada, an inverted
+      ! temperature gradient that pumps luminosity into the layer). Physically such a
+      ! layer overturns on a dynamical timescale, so every run of cells whose faces are
+      ! unstable by the Ledoux criterion (with B from the equation of state at the new
+      ! composition) is homogenized here, every species mass-weighted. Blocks grow until
+      ! the face above them is stable, e.g. down to the centre of a uniform interior.
+      n_merged_faces = 0
+      n_mixed_blocks = 0
+      k_overturn_outer = 0
+      k_overturn_inner = 0
+      if (s% element_sedimentation_overturn_unstable_layers) then
+         call overturn_unstable_layers(nz, species, s% dm, s% xa, ledoux_unstable_face, &
+            n_merged_faces, n_mixed_blocks, k_overturn_outer, k_overturn_inner)
+         if (ierr /= 0) then  ! set by ledoux_unstable_face if the EOS failed
+            write(*,'(a)') ' element_sedimentation: overturn of unstable layers failed (equation of state)'
+            s% xa(1:species,1:nz) = xa_start(1:species,1:nz)
+            call cleanup()
+            return
+         end if
       end if
 
       ! --- post checks: bounds, sum of mass fractions, conservation of every species
@@ -495,8 +646,16 @@ contains
          end if
       end do
 
-      ! --- optionally switch off MESA's mixing where the mixture is immiscible
-      if (s% element_sedimentation_suppress_mixing_in_immiscible_regions) then
+      ! --- MESA's composition mixing for the rest of the step: the transport above already
+      ! mixed every species with D_mix together with the rain, so switch MESA's mixing off.
+      ! D_mix is not recomputed within the step after this hook (okay_to_set_mixing_info is
+      ! false), but do_struct_burn_mix rebuilds sig from D_mix (get_convection_sigmas), so
+      ! D_mix itself is set to zero (sig follows); MESA recomputes it at the next step.
+      if (s% element_sedimentation_replace_mesa_mixing) then
+         s% D_mix(1:nz) = 0d0
+         s% sig(1:nz) = 0d0
+      else if (s% element_sedimentation_suppress_mixing_in_immiscible_regions) then
+         ! --- optionally switch off MESA's mixing where the mixture is immiscible
          if (s% do_conv_premix) then
             if (.not. conv_premix_notice_printed) then
                write(*,'(a)') ' element_sedimentation: WARNING: convective premixing and element sedimentation ' // &
@@ -529,14 +688,18 @@ contains
          else
             cons_err = 0d0
          end if
-         write(*,'(a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,a,a,1pd10.3,a,1pd10.3,a,1pd9.2,a,1pd9.2,a,1pd9.2,a,1pd9.2,a,i0)') &
-            ' element_sedimentation: model ', s% model_number, &
-            ' n_gap ', n_gap, ' (k ', k_first, '-', k_last, ') steps ', stats% steps, &
+         write(*,'(a,i0,a,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,a,a,1pd10.3,a,1pd10.3,a,1pd9.2,a,1pd9.2,a,1pd9.2,a,1pd9.2,a,i0)') &
+            ' element_sedimentation: model ', s% model_number, trim(merge(' rain', ' mix ', rain_active)), &
+            ' n_gap ', n_gap, ' n_sat ', n_sat, ' (k ', k_first, '-', k_last, ') n_contrast ', n_contrast, &
+            ' steps ', stats% steps, &
             ' rejected ', stats% rejected_steps, &
             ' newton ', stats% newton_iters, ' stop ', trim(stop_reason_name(stats% stop_reason)), &
             ' max_dX ', maxval(abs(s% xa(i_sed,1:nz) - xa_start(i_sed,1:nz))), ' mass_moved[g] ', mass_moved, &
             ' cons_err ', cons_err, ' damping ', damping, ' passive_defect ', max_passive_defect, &
             ' max|sum-1| ', max_sum_dev, ' renormalized ', num_renormalized
+         if (n_merged_faces > 0) write(*,'(a,i0,a,i0,a,i0,a,i0,a)') &
+            ' element_sedimentation: overturn of unstable layers: ', n_merged_faces, ' faces mixed away in ', &
+            n_mixed_blocks, ' block(s) (cells ', k_overturn_outer, '-', k_overturn_inner, ')'
          if (stats% num_clipped > 0) write(*,11) 'element_sedimentation: tiny negatives clipped', stats% num_clipped
          if (max_species_dev > 0d0) write(*,'(a,1pd12.4)') &
             ' element_sedimentation: max relative change of a species total mass ', max_species_dev
@@ -627,9 +790,65 @@ contains
       end subroutine after_step
 
 
+      logical function ledoux_unstable_face(k, xa_above, xa_below)
+         ! Face k (between cell k-1 above and cell k below) is convectively unstable by
+         ! the Ledoux criterion, gradr > grada + B, for the given compositions of the
+         ! two sides. B is MESA's composition term (brunt.f90, get_brunt_B): the change
+         ! of ln P at the face (rho, T) from the composition of the upper to that of
+         ! the lower side, over the pressure difference of the cells, divided by chiT.
+         ! B < 0 for a heavier layer on top. gradr and grada are the face values of the
+         ! start of the step. Host association provides s, nz, species and ierr; an EOS
+         ! failure sets ierr and returns .false.
+         integer, intent(in) :: k
+         real(dp), intent(in) :: xa_above(:), xa_below(:)
+         real(dp) :: alfa, rho_f, T_f, chiT_f, Prad_f, Ppoint, delta_lnP, lnP_above, lnP_below, &
+            e_f, Pgas_f, B
+         integer :: ierr_eos
+
+         ledoux_unstable_face = .false.
+         if (ierr /= 0) return
+         if (k < 2 .or. k > nz) return
+         if (maxval(abs(xa_above(1:species) - xa_below(1:species))) < overturn_composition_tol) return
+
+         alfa = s% dq(k-1)/(s% dq(k-1) + s% dq(k))
+         rho_f = alfa*s% rho(k) + (1d0 - alfa)*s% rho(k-1)
+         T_f = alfa*s% T(k) + (1d0 - alfa)*s% T(k-1)
+         chiT_f = alfa*s% chiT(k) + (1d0 - alfa)*s% chiT(k-1)
+         if (chiT_f <= 0d0 .or. rho_f <= 0d0 .or. T_f <= 0d0) return
+         Prad_f = crad*T_f*T_f*T_f*T_f/3d0
+
+         delta_lnP = s% lnPeos(k-1) - s% lnPeos(k)
+         if (delta_lnP > -1d-50) then  ! hydrostatic estimate, as in MESA
+            Ppoint = alfa*s% Peos(k) + (1d0 - alfa)*s% Peos(k-1)
+            delta_lnP = -s% cgrav(k)*s% m(k)/(pi4*s% r(k)*s% r(k)*s% r(k)*s% r(k)*Ppoint)*s% dm_bar(k)
+            if (delta_lnP >= 0d0) return
+         end if
+
+         call eos_at_rho_T(s, 0, xa_above, rho_f, T_f, e_f, Pgas_f, ierr_eos)
+         if (ierr_eos /= 0) then
+            ierr = ierr_eos
+            write(*,'(a,i0)') ' element_sedimentation: EOS failed at the face of the overturn test, k = ', k
+            return
+         end if
+         lnP_above = log(Prad_f + Pgas_f)
+         call eos_at_rho_T(s, 0, xa_below, rho_f, T_f, e_f, Pgas_f, ierr_eos)
+         if (ierr_eos /= 0) then
+            ierr = ierr_eos
+            write(*,'(a,i0)') ' element_sedimentation: EOS failed at the face of the overturn test, k = ', k
+            return
+         end if
+         lnP_below = log(Prad_f + Pgas_f)
+
+         B = (lnP_below - lnP_above)/delta_lnP/chiT_f
+         if (is_bad(B)) return
+         ledoux_unstable_face = (B < 0d0 .and. s% gradr(k) > s% grada_face(k) + B)
+      end function ledoux_unstable_face
+
+
       subroutine cleanup()
          call free_adv_diff_problem(p)
          call free_adv_diff_problem(pp)
+         call free_adv_diff_problem(p_mix)
       end subroutine cleanup
 
    end subroutine do_advection_diffusion_rain
@@ -724,5 +943,199 @@ contains
          name = 'none'
       end select
    end function stop_reason_name
+
+
+   ! ---------------------------------------------------------------------------
+   ! energy carried by the moved species
+   ! ---------------------------------------------------------------------------
+
+   subroutine enthalpy_flux_heating(s, dt, xa_old, ierr)
+      ! Heating rate of every cell from the divergence of the enthalpy flux carried
+      ! by the species the step moved (sedimentation_energy): the mass flow rates
+      ! through the faces follow from the composition change, the partial specific
+      ! enthalpies from finite differences of the EOS at the (rho, T) of the cells
+      ! (values at the start of the step, where the composition change is applied),
+      ! averaged to the faces with the cell masses as weights. The result is kept in
+      ! eps_enthalpy_flux for finish_element_sedimentation.
+      type (star_info), pointer :: s
+      real(dp), intent(in) :: dt
+      real(dp), intent(in) :: xa_old(:,:)  ! (species, nz) composition at entry of the step
+      integer, intent(out) :: ierr
+      integer :: nz, species, j, k, k_top, k_bottom, k_max
+      real(dp), allocatable :: flow(:,:), h_cell(:,:), h_face(:,:), energy_flux(:)
+      logical, allocatable :: needed(:,:)
+      real(dp) :: dh, total
+      include 'formats'
+
+      ierr = 0
+      nz = s% nz
+      species = s% species
+      enthalpy_flux_valid = .false.
+      if (allocated(eps_enthalpy_flux)) then
+         if (size(eps_enthalpy_flux) < nz) deallocate(eps_enthalpy_flux)
+      end if
+      if (.not. allocated(eps_enthalpy_flux)) allocate(eps_enthalpy_flux(nz))
+      eps_enthalpy_flux(1:nz) = 0d0
+
+      allocate(flow(species,nz+1), h_cell(species,nz), h_face(species,nz+1), energy_flux(nz+1), &
+         needed(species,nz))
+      call species_face_flow_rates(nz, species, s% dm, xa_old, s% xa, dt, flow)
+      if (maxval(abs(flow(1:species,1:nz+1))) == 0d0) then
+         enthalpy_flux_valid = .true.
+         return
+      end if
+
+      ! partial enthalpies relative to the partner species: the flow rates of a face add
+      ! up to zero, so the reference drops out; needed only in the cells next to a face
+      ! with a flow of that species
+      needed = .false.
+      do k = 2, nz
+         do j = 1, species
+            if (j == i_partner .or. flow(j,k) == 0d0) cycle
+            needed(j,k-1) = .true.
+            needed(j,k) = .true.
+         end do
+      end do
+      h_cell = 0d0
+      do k = 1, nz
+         do j = 1, species
+            if (.not. needed(j,k)) cycle
+            call partial_enthalpy(s, k, j, xa_old(1:species,k), dh, ierr)
+            if (ierr /= 0) return
+            h_cell(j,k) = dh
+         end do
+      end do
+      h_face = 0d0
+      do k = 2, nz
+         do j = 1, species
+            if (j == i_partner) cycle
+            h_face(j,k) = (s% dm(k)*h_cell(j,k-1) + s% dm(k-1)*h_cell(j,k))/(s% dm(k-1) + s% dm(k))
+         end do
+      end do
+
+      call face_energy_flux(nz, species, flow, h_face, energy_flux)
+      call flux_divergence_heating(nz, s% dm, energy_flux, eps_enthalpy_flux)
+      do k = 1, nz
+         if (is_bad(eps_enthalpy_flux(k))) then
+            ierr = 1
+            write(*,2) ' element_sedimentation: NaN or Inf in the enthalpy flux heating of cell', k, eps_enthalpy_flux(k)
+            return
+         end if
+      end do
+      enthalpy_flux_valid = .true.
+
+      if (s% element_sedimentation_report) then
+         total = dot_product(s% dm(1:nz), eps_enthalpy_flux(1:nz))
+         write(*,'(a,1pd10.3,a,1pd10.3,a,1pd10.3,a,1pd10.3,a,1pd10.3)') &
+            ' element_sedimentation: enthalpy flux of the moved species: max |E| [erg/s] ', &
+            maxval(abs(energy_flux(1:nz+1))), ' eps min ', minval(eps_enthalpy_flux(1:nz)), &
+            ' max ', maxval(eps_enthalpy_flux(1:nz)), ' [erg/g/s] sum(dm eps) ', total, &
+            ' /(dm max|eps|) ', total/max(maxval(s% dm(1:nz)*abs(eps_enthalpy_flux(1:nz))), tiny(total))
+         ! partial enthalpy difference of the sedimenting species and its partner in units
+         ! of kT/m_p at the outermost and innermost face the species crosses and at the
+         ! face with the largest energy flux (an ideal H2/He gas gives -9/8 for He - H;
+         ! the dense H/He fluid of a giant planet several times that)
+         k_top = 0
+         k_bottom = 0
+         do k = 2, nz
+            if (flow(i_sed,k) == 0d0) cycle
+            if (k_top == 0) k_top = k
+            k_bottom = k
+         end do
+         k_max = maxloc(abs(energy_flux(2:nz)), dim=1) + 1
+         if (k_top > 0) write(*,'(a,i0,a,1pd10.3,a,i0,a,1pd10.3,a,i0,a,1pd10.3)') &
+            ' element_sedimentation: (h_' // trim(chem_isos% name(s% chem_id(i_sed))) // ' - h_' // &
+            trim(chem_isos% name(s% chem_id(i_partner))) // ')/(kT/m_p): outermost crossed face ', k_top, ' ', &
+            h_face(i_sed,k_top)/(boltzm*face_T(k_top)/mp), ', innermost ', k_bottom, ' ', &
+            h_face(i_sed,k_bottom)/(boltzm*face_T(k_bottom)/mp), ', face of max |E| ', k_max, ' ', &
+            h_face(i_sed,k_max)/(boltzm*face_T(k_max)/mp)
+      end if
+
+   contains
+
+      real(dp) function face_T(k)
+         integer, intent(in) :: k
+         face_T = (s% dm(k)*s% T(k-1) + s% dm(k-1)*s% T(k))/(s% dm(k-1) + s% dm(k))
+      end function face_T
+
+   end subroutine enthalpy_flux_heating
+
+
+   subroutine partial_enthalpy(s, k, j, xa, dh, ierr)
+      ! Partial specific enthalpy of species j relative to the partner species in cell
+      ! k, (dh/dX_j)_{T,P} with X_partner compensating, from a finite difference of the
+      ! EOS at fixed (rho, T) around the composition xa (sedimentation_energy for the
+      ! conversion to fixed pressure). Central differences of size dxa_eos where both
+      ! species allow it, one-sided ones at the edges of the composition range.
+      type (star_info), pointer :: s
+      integer, intent(in) :: k, j
+      real(dp), intent(in) :: xa(:)  ! (species)
+      real(dp), intent(out) :: dh
+      integer, intent(out) :: ierr
+      real(dp) :: xa_plus(s% species), xa_minus(s% species), delta_plus, delta_minus, &
+         e_plus, e_minus, Pgas_plus, Pgas_minus
+      include 'formats'
+
+      ierr = 0
+      dh = 0d0
+
+      ! steps towards more (plus) and less (minus) of species j, each taken from the
+      ! partner; limited by the abundances so that no mass fraction becomes negative
+      delta_plus = min(dxa_eos, xa(i_partner))
+      delta_minus = min(dxa_eos, xa(j))
+      if (delta_plus + delta_minus < dxa_eos_min) return  ! both species absent: nothing moves here
+
+      xa_plus(1:s% species) = xa(1:s% species)
+      xa_plus(j) = xa(j) + delta_plus
+      xa_plus(i_partner) = xa(i_partner) - delta_plus
+      xa_minus(1:s% species) = xa(1:s% species)
+      xa_minus(j) = xa(j) - delta_minus
+      xa_minus(i_partner) = xa(i_partner) + delta_minus
+
+      call eos_e_and_Pgas(s, k, xa_plus, e_plus, Pgas_plus, ierr)
+      if (ierr /= 0) return
+      call eos_e_and_Pgas(s, k, xa_minus, e_minus, Pgas_minus, ierr)
+      if (ierr /= 0) return
+
+      dh = partial_enthalpy_increment((e_plus - e_minus)/(delta_plus + delta_minus), &
+         (Pgas_plus - Pgas_minus)/(delta_plus + delta_minus), s% rho(k), s% chiT(k), s% chiRho(k))
+      if (is_bad(dh)) then
+         ierr = 1
+         write(*,3) ' element_sedimentation: NaN or Inf partial enthalpy for species, cell', j, k, dh
+      end if
+
+   end subroutine partial_enthalpy
+
+
+   subroutine eos_e_and_Pgas(s, k, xa, e, Pgas, ierr)
+      ! specific internal energy and gas pressure of cell k at its (rho, T) for the composition xa
+      type (star_info), pointer :: s
+      integer, intent(in) :: k
+      real(dp), intent(in) :: xa(:)
+      real(dp), intent(out) :: e, Pgas
+      integer, intent(out) :: ierr
+      include 'formats'
+      call eos_at_rho_T(s, k, xa, s% rho(k), s% T(k), e, Pgas, ierr)
+      if (ierr /= 0) write(*,2) ' element_sedimentation: EOS failed for a perturbed composition in cell', k
+   end subroutine eos_e_and_Pgas
+
+
+   subroutine eos_at_rho_T(s, k, xa, rho, T, e, Pgas, ierr)
+      ! specific internal energy and gas pressure at (rho, T) for the composition xa;
+      ! k is the cell the call belongs to (0: a face or no particular cell)
+      type (star_info), pointer :: s
+      integer, intent(in) :: k
+      real(dp), intent(in) :: xa(:), rho, T
+      real(dp), intent(out) :: e, Pgas
+      integer, intent(out) :: ierr
+      real(dp), dimension(num_eos_basic_results) :: res, dres_dlnd, dres_dlnT
+      real(dp) :: dres_dxa(num_eos_d_dxa_results, s% species)
+      e = 0d0
+      Pgas = 0d0
+      call get_eos(s, k, xa, rho, log10(rho), T, log10(T), res, dres_dlnd, dres_dlnT, dres_dxa, ierr)
+      if (ierr /= 0) return
+      e = exp(res(i_lnE))
+      Pgas = exp(res(i_lnPgas))
+   end subroutine eos_at_rho_T
 
 end module element_sedimentation

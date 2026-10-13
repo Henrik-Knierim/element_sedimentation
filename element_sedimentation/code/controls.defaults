@@ -120,9 +120,8 @@
 
       ! Factor multiplying MESA's ``D_mix`` in the diffusive part of the transport.
       ! The conductance is built from ``D_mix`` exactly like MESA's ``sig``, but without
-      ! ``mix_factor``: setting ``mix_factor = 0`` (MESA does not mix the composition)
-      ! leaves the convective mixing of the sedimenting species and of the displaced
-      ! mixture to this module, which is how ``planet_helium_rain`` is set up.
+      ! ``mix_factor``, so the module mixes even if ``mix_factor = 0`` (a workaround that was
+      ! needed before ``element_sedimentation_replace_mesa_mixing`` existed).
 
       ! ::
 
@@ -186,14 +185,16 @@
       ! element_sedimentation_maximum_dXi_per_cell
       ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! Maximum change of the mass fraction of the sedimenting species in any cell in one
-      ! MESA step. The transport is solved as usual; if the result changes some cell by more
-      ! than this, the composition change of the step is scaled down for all species,
-      ! ``xa = xa_start + f*(xa_new - xa_start)`` with ``f = limit/(largest change)``, so
-      ! that the largest change equals the limit. The scaled state still conserves every
-      ! species, sums to one and keeps uniform convective regions uniform; the remaining
-      ! rain happens in the following steps. This can help convergence when a lot of
-      ! material rains out at once. Negative values disable the limit.
+      ! Ceiling on the change of the mass fraction of the sedimenting species caused by rain
+      ! in any cell in one MESA step, meant to keep MESA from failing when a lot of material
+      ! rains out at once. The transport is also solved without rain (mixing only, same
+      ! ``D_mix``); if rain changes some cell by more than this relative to that mixing-only
+      ! state, the step is scaled down for all species,
+      ! ``xa = xa_mix + f*(xa_rain - xa_mix)`` with ``f = limit/(largest change)``. In unmixed
+      ! (e.g. radiative) cells ``xa_mix`` is the composition at the start of the step, so the
+      ! ceiling applies there directly; mixed regions stay mixed. The scaled state conserves
+      ! every species and sums to one; the remaining rain happens in the following steps.
+      ! Negative values disable the limit.
 
       ! ::
 
@@ -220,8 +221,11 @@
       ! element_sedimentation_cell_threshold_for_precipitation
       ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! Minimum number of cells inside the immiscibility gap for sedimentation to be
-      ! applied (at least one cell is always required).
+      ! Minimum number of saturated cells (mass fraction of the sedimenting species at or
+      ! above the He-poor limit) for rain to happen (at least one is always required).
+      ! Cells left exactly at their limit by the previous step count, so the rain keeps
+      ! going once it has started. Below the threshold the module still acts in mixing-only
+      ! steps if ``element_sedimentation_act_on_mixing_contrast`` asks for it.
 
       ! ::
 
@@ -233,7 +237,10 @@
       ! If true, MESA's mixing coefficients (``D_mix`` and ``sig``) are set to zero on
       ! both faces of every cell that was inside the immiscibility gap before the
       ! transport, for the rest of the step. Also sets ``do_conv_premix = .false.``.
-      ! Only used by ``'advection_diffusion_rain'``. The legacy methods ignore it:
+      ! Only used by ``'advection_diffusion_rain'`` and only if
+      ! ``element_sedimentation_replace_mesa_mixing = .false.`` (which switches off all of
+      ! MESA's composition mixing in the steps in which the module acts). The legacy methods
+      ! ignore it:
       ! ``'instant_rain'`` always sets ``D_mix = 0`` in the immiscible cells and switches
       ! off ``do_conv_premix``; ``'bottom_up_rain'`` never changes the mixing.
 
@@ -241,20 +248,136 @@
 
     element_sedimentation_suppress_mixing_in_immiscible_regions = .false.
 
+      ! element_sedimentation_replace_mesa_mixing
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! If true, the module replaces MESA's composition mixing in every step in which it
+      ! acts: its transport already mixes all species with ``D_mix`` (to steady state, or for
+      ! ``dt`` in time-accurate mode) together with the rain, so ``D_mix`` and ``sig`` are set
+      ! to zero for the rest of that step (MESA recomputes them at the next step). In steps
+      ! in which the module does not act (no saturated cell and, with
+      ! ``element_sedimentation_act_on_mixing_contrast``, no mixed face with a composition
+      ! contrast) MESA mixes as usual. This keeps MESA's mixing from undoing
+      ! the rain, so ``mix_factor`` can stay at 1. Note that the profiles of such steps show
+      ! ``D_mix = 0`` (``mixing_type`` is unchanged), and that in a steady-state solve all
+      ! regions connected by ``D_mix > 0`` are homogenized regardless of how slow the mixing
+      ! is (use ``element_sedimentation_solve_to_steady_state = .false.`` if slow mixing
+      ! processes matter). If false, MESA's mixing is left alone (then set ``mix_factor = 0``
+      ! or ``element_sedimentation_suppress_mixing_in_immiscible_regions``).
+
+      ! ::
+
+    element_sedimentation_replace_mesa_mixing = .true.
+
+      ! element_sedimentation_overturn_unstable_layers
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! If true, layers that the transport leaves convectively unstable are mixed at once
+      ! (``sedimentation_overturn.f90``). The rain is deposited below the immiscible region
+      ! and spread with the mixing coefficients of the start of the step; where those are
+      ! zero (a layer below the rain region that has become radiative because the helium
+      ! gradient throttles the luminosity) the deposit sits as a heavier layer on top of
+      ! lighter material. MESA's mixing coefficients are fixed for the step, so it could
+      ! not mix the inversion away, and its convection treatment reacts to the inverted
+      ! composition gradient with an inverted temperature gradient (``gradT = gradL < 0``)
+      ! that pumps luminosity into the deposit and out of the core. Physically such a layer
+      ! overturns on a dynamical timescale. Every run of cells whose faces are unstable by
+      ! the Ledoux criterion, ``gradr > grada + B`` with ``B`` from the equation of state at
+      ! the new composition (as in MESA's ``brunt.f90``), is therefore homogenized, every
+      ! species mass-weighted, with the pool-adjacent-violators algorithm: blocks grow
+      ! until the face above them is stable, e.g. down to the centre of an interior of
+      ! uniform composition. ``gradr`` and ``grada`` are those of the start of the step.
+      ! Faces that are only thermohaline-unstable (``gradr < grada + B``, ``B < 0``) are left
+      ! to MESA. Only used by ``'advection_diffusion_rain'``. The report line shows the
+      ! number of faces and blocks mixed.
+
+      ! ::
+
+    element_sedimentation_overturn_unstable_layers = .true.
+
+      ! element_sedimentation_act_on_mixing_contrast
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! If true, the module also acts in steps without saturated cells whenever some
+      ! face with ``D_mix > 0`` separates cells whose mass fractions of the sedimenting
+      ! species differ by more than ``element_sedimentation_mixing_contrast_tolerance``:
+      ! it then runs its transport without rain (mixing only, with the passive species,
+      ! the damping, the overturn and the energy terms) and switches MESA's mixing off for
+      ! the step as usual. Reason: MESA's own mixing carries no enthalpy flux (every cell
+      ! keeps its internal energy while its composition changes). After rain the
+      ! species-poor envelope lies on the species-rich interior; when MESA's convection
+      ! later reaches through that interface, the exchange of hydrogen-rich and
+      ! helium-rich material is of the same kind as the rain, and with the partial
+      ! enthalpy difference of the dense fluid (several kT/m_p) MESA's bookkeeping cools
+      ! the cells that receive hydrogen (the core, by ~100 K per 0.3 % of helium) and
+      ! heats the ones that receive helium. With this control every composition change
+      ! of the species in a mixed region goes through the module and its energy terms.
+      ! Only used by ``'advection_diffusion_rain'``. Note that in steady-state mode the
+      ! module homogenizes every region connected by ``D_mix > 0`` at once; set it to
+      ! false in models where slow mixing processes (thermohaline, rotational) of the
+      ! species matter, or use ``element_sedimentation_solve_to_steady_state = .false.``.
+
+      ! ::
+
+    element_sedimentation_act_on_mixing_contrast = .true.
+
+      ! element_sedimentation_mixing_contrast_tolerance
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Difference of the mass fraction of the sedimenting species across a mixed face
+      ! above which ``element_sedimentation_act_on_mixing_contrast`` makes the module act.
+
+      ! ::
+
+    element_sedimentation_mixing_contrast_tolerance = 1d-6
+
       ! element_sedimentation_heating
       ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! If true, the change of internal energy caused by the composition changes of the
-      ! sedimentation is included as a heating term in the energy equation (like
-      ! ``do_phase_separation_heating``). As for phase separation, the term is always part
-      ! of MESA's total-energy bookkeeping, so switching it off makes the reported energy
-      ! conservation error reflect the omitted heating and will trigger
+      ! If true, ``eps_element_sedimentation`` is included as a heating term in the energy
+      ! equation (both the ``dedt`` and the ``eps_grav`` form; like
+      ! ``do_phase_separation_heating``). It consists of the change of the internal energy
+      ! caused by the composition change at fixed (rho, T), which keeps every cell's
+      ! internal energy fixed while its composition changes and so conserves the total
+      ! energy (MESA's ``xa_start`` and ``energy_start`` are reset after this hook, so the
+      ! composition term of ``eps_grav`` does not see the sedimentation and there is no
+      ! double counting), plus, with ``element_sedimentation_include_enthalpy_flux``, the
+      ! energy carried by the moved species. As for phase separation, the term is always
+      ! part of MESA's total-energy bookkeeping, so switching it off makes the reported
+      ! energy conservation error reflect the omitted heating and will trigger
       ! ``hard_limit_for_rel_error_in_energy_conservation`` retries unless that limit is
       ! relaxed; use ``.false.`` only for experiments.
 
       ! ::
 
     element_sedimentation_heating = .true.
+
+      ! element_sedimentation_include_enthalpy_flux
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! If true, the species moved by the sedimentation carry their partial specific
+      ! enthalpy, evaluated from the equation of state at fixed temperature and pressure
+      ! (``sedimentation_energy.f90``). The divergence of this energy flux is added to
+      ! ``eps_element_sedimentation``: a cell gains the enthalpy of what arrives and loses
+      ! the enthalpy of what leaves. In the Lagrangian frame the sinking species is
+      ! replaced by an equal mass of the others, so this term contains the buoyancy work
+      ! of the sinking species (the gravitational energy dissipated by drag where it falls)
+      ! and the heat carried by the exchange of hot material from below against cold
+      ! material from above; the gravitational energy released by the contraction of the
+      ! mass shells enters through the structure equations as usual. The term sums to zero
+      ! over the star: it only redistributes energy. If false, every cell keeps its internal
+      ! energy while its composition changes, as MESA does for element diffusion and phase
+      ! separation; for helium rain that cools the helium-depleted envelope and heats the
+      ! helium-enriched layers by the enthalpy difference of H and He per gram exchanged
+      ! (9/8 kT/m_p for an ideal H2/He gas, 6-7 kT/m_p in the dense fluid at the rain
+      ! region of a Jupiter-mass planet with the CMS equation of state), which cools the
+      ! envelope by hundreds of K and lowers T_eff while rain is strong. With
+      ! ``element_sedimentation_report`` the ratio of that difference to kT/m_p at the top
+      ! and bottom of the rain region is printed every step.
+
+      ! ::
+
+    element_sedimentation_include_enthalpy_flux = .true.
 
       ! element_sedimentation_report
       ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

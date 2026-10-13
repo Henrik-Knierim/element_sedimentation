@@ -66,7 +66,12 @@ into `$MESA_DIR/star/defaults/controls.defaults`):
 | `element_sedimentation_retry_change_factor` | `0.5d0` |
 | `element_sedimentation_cell_threshold_for_precipitation` | `1` |
 | `element_sedimentation_suppress_mixing_in_immiscible_regions` | `.false.` |
+| `element_sedimentation_replace_mesa_mixing` | `.true.` |
+| `element_sedimentation_overturn_unstable_layers` | `.true.` |
+| `element_sedimentation_act_on_mixing_contrast` | `.true.` |
+| `element_sedimentation_mixing_contrast_tolerance` | `1d-6` |
 | `element_sedimentation_heating` | `.true.` |
+| `element_sedimentation_include_enthalpy_flux` | `.true.` |
 | `element_sedimentation_report` | `.false.` |
 
 ## Structure
@@ -78,13 +83,16 @@ element_sedimentation/
       advection_diffusion.f90          generic implicit advection-diffusion solver (no MESA dependency)
       sedimentation_phase_diagram.f90  phase diagram reader and interpolation
       sedimentation_miscibility.f90    composition arithmetic and per-cell miscibility limits
-      element_sedimentation.f90        MESA driver (do_element_sedimentation, shutdown_element_sedimentation)
+      sedimentation_energy.f90         energy carried by the moved species (enthalpy flux and its divergence)
+      sedimentation_overturn.f90       instantaneous mixing of layers left convectively unstable
+      element_sedimentation.f90        MESA driver (do_element_sedimentation, finish_element_sedimentation, shutdown_element_sedimentation)
       element_sedimentation_legacy.f90 old instant_rain / bottom_up_rain algorithms
       makefile_base, controls.defaults, star_controls.inc, ctrls_io.f90,
       star_data_step_work.inc, alloc.f90, hydro_energy.f90, evolve.f90, init.f90   patch snippets
    test/                    unit tests (./mk, ./rn, ./clean), data/Schoettler+2018.csv
    backup/                  pristine MESA files (created by setup.py, not in git)
 docs/index.md               physics, numerics, controls, installation, tests
+docs/CHANGELOG.md           what changed and why (2026-10 refactor)
 docs/TODO.md                open points
 planet_helium_rain/         example work directory
 ```

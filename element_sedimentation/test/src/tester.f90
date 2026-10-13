@@ -20,6 +20,8 @@ program tester
    use test_advection_diffusion, only: run_advection_diffusion_tests
    use test_phase_diagram, only: run_phase_diagram_tests
    use test_miscibility, only: run_miscibility_tests
+   use test_sedimentation_energy, only: run_sedimentation_energy_tests
+   use test_sedimentation_overturn, only: run_sedimentation_overturn_tests
 
    implicit none
 
@@ -29,6 +31,8 @@ program tester
    call run_advection_diffusion_tests(nfail)
    call run_phase_diagram_tests(nfail)
    call run_miscibility_tests(nfail)
+   call run_sedimentation_energy_tests(nfail)
+   call run_sedimentation_overturn_tests(nfail)
    call print_test_summary(nfail)
    if (nfail > 0) error stop 'element_sedimentation tests FAILED'
 

@@ -20,7 +20,12 @@
     element_sedimentation_retry_change_factor, &
     element_sedimentation_cell_threshold_for_precipitation, &
     element_sedimentation_suppress_mixing_in_immiscible_regions, &
+    element_sedimentation_replace_mesa_mixing, &
+    element_sedimentation_overturn_unstable_layers, &
+    element_sedimentation_act_on_mixing_contrast, &
+    element_sedimentation_mixing_contrast_tolerance, &
     element_sedimentation_heating, &
+    element_sedimentation_include_enthalpy_flux, &
     element_sedimentation_report, &
 ! anchor = 's% phase_separation_no_diffusion = phase_separation_no_diffusion'
 
@@ -44,7 +49,12 @@
  s% element_sedimentation_retry_change_factor = element_sedimentation_retry_change_factor
  s% element_sedimentation_cell_threshold_for_precipitation = element_sedimentation_cell_threshold_for_precipitation
  s% element_sedimentation_suppress_mixing_in_immiscible_regions = element_sedimentation_suppress_mixing_in_immiscible_regions
+ s% element_sedimentation_replace_mesa_mixing = element_sedimentation_replace_mesa_mixing
+ s% element_sedimentation_overturn_unstable_layers = element_sedimentation_overturn_unstable_layers
+ s% element_sedimentation_act_on_mixing_contrast = element_sedimentation_act_on_mixing_contrast
+ s% element_sedimentation_mixing_contrast_tolerance = element_sedimentation_mixing_contrast_tolerance
  s% element_sedimentation_heating = element_sedimentation_heating
+ s% element_sedimentation_include_enthalpy_flux = element_sedimentation_include_enthalpy_flux
  s% element_sedimentation_report = element_sedimentation_report
 ! anchor = 'phase_separation_no_diffusion = s% phase_separation_no_diffusion'
 
@@ -68,5 +78,10 @@
  element_sedimentation_retry_change_factor = s% element_sedimentation_retry_change_factor
  element_sedimentation_cell_threshold_for_precipitation = s% element_sedimentation_cell_threshold_for_precipitation
  element_sedimentation_suppress_mixing_in_immiscible_regions = s% element_sedimentation_suppress_mixing_in_immiscible_regions
+ element_sedimentation_replace_mesa_mixing = s% element_sedimentation_replace_mesa_mixing
+ element_sedimentation_overturn_unstable_layers = s% element_sedimentation_overturn_unstable_layers
+ element_sedimentation_act_on_mixing_contrast = s% element_sedimentation_act_on_mixing_contrast
+ element_sedimentation_mixing_contrast_tolerance = s% element_sedimentation_mixing_contrast_tolerance
  element_sedimentation_heating = s% element_sedimentation_heating
+ element_sedimentation_include_enthalpy_flux = s% element_sedimentation_include_enthalpy_flux
  element_sedimentation_report = s% element_sedimentation_report
