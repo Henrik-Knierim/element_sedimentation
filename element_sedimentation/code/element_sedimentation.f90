@@ -32,8 +32,7 @@ module element_sedimentation
    ! sedimentation_miscibility. Layers that the transport leaves convectively
    ! unstable (a heavy deposit on top of cells that were not mixed at the start
    ! of the step) are mixed at once by sedimentation_overturn with the Ledoux
-   ! criterion evaluated here. The old instant_rain and bottom_up_rain
-   ! algorithms are kept in element_sedimentation_legacy.
+   ! criterion evaluated here.
    !
    ! Called from evolve.f90 after the mixing information of the step has been
    ! set (okay_to_set_mixing_info = .false.). The evolve.f90 snippet installed
@@ -58,8 +57,6 @@ module element_sedimentation
    use sedimentation_energy, only: species_face_flow_rates, face_energy_flux, &
       flux_divergence_heating, partial_enthalpy_increment
    use sedimentation_overturn, only: overturn_unstable_layers
-   use element_sedimentation_legacy, only: init_element_sedimentation_legacy, &
-      shutdown_element_sedimentation_legacy, do_instant_rain, do_bottom_up_rain
 
    implicit none
 
@@ -69,8 +66,6 @@ module element_sedimentation
    character(len=*), parameter :: method_advection_diffusion = 'advection_diffusion_rain'
    character(len=*), parameter :: method_instant = 'instant_rain'
    character(len=*), parameter :: method_bottom_up = 'bottom_up_rain'
-   character(len=*), parameter :: method_instant_legacy = 'instant_rain_legacy'
-   character(len=*), parameter :: method_bottom_up_legacy = 'bottom_up_rain_legacy'
    character(len=*), parameter :: velocity_constant = 'constant'
 
    real(dp), parameter :: sum_renormalize_tol = 1d-10  ! renormalize a cell when |sum xa - 1| exceeds this
@@ -93,10 +88,6 @@ module element_sedimentation
    integer :: i_sed = 0       ! index of the sedimenting species in s% xa
    integer :: i_partner = 0   ! index of the partner species of the two-component phase diagram
    real(dp), allocatable :: A(:)  ! (species) atomic weights
-   integer :: legacy_i_sed = 0, legacy_i_partner = 0, legacy_species = 0  ! state the legacy module was initialized with
-   integer :: pd_load_count = 0          ! incremented on every (re)load of the phase diagram
-   integer :: legacy_pd_load_count = -1  ! pd_load_count when the legacy module copied the phase diagram
-   logical :: legacy_notice_printed = .false.
    logical :: conv_premix_notice_printed = .false.
    ! retry damping (element_sedimentation_retry_change_factor): the largest change of the
    ! mass fraction of the sedimenting species in the last attempt and the model it belongs to
@@ -117,15 +108,15 @@ contains
 
    subroutine do_element_sedimentation(s, dt, ierr)
       ! transport the sedimenting species for one MESA step of length dt [s];
-      ! ierr /= 0 (with messages on stdout) makes MESA retry the step
+      ! ierr > 0 (with messages on stdout) makes MESA retry the step, ierr < 0 is a
+      ! configuration error (unknown method, phase diagram, species) that ends the run
+      ! (evolve.f90 snippet)
       type (star_info), pointer :: s
       real(dp), intent(in) :: dt
       integer, intent(out) :: ierr
       real(dp), allocatable :: xa_entry(:,:)
       integer(8) :: clock_start, clock_end, clock_rate
-      real(dp) :: seconds, max_dx, mass_moved
-      integer :: k
-      logical :: legacy
+      real(dp) :: seconds, max_dx
 
       ierr = 0
       enthalpy_flux_valid = .false.
@@ -133,7 +124,8 @@ contains
 
       call initialize(s, ierr)
       if (ierr /= 0) then
-         write(*,'(a)') ' element_sedimentation: initialization failed; see the messages above'
+         write(*,'(a)') ' element_sedimentation: initialization failed (phase diagram or species); see the messages above'
+         ierr = -1  ! configuration error: the run ends
          return
       end if
 
@@ -141,44 +133,17 @@ contains
       allocate(xa_entry(s% species, s% nz))
       xa_entry(1:s% species,1:s% nz) = s% xa(1:s% species,1:s% nz)
 
-      legacy = .false.
       select case (trim(s% element_sedimentation_method))
       case (method_advection_diffusion, method_instant, method_bottom_up)
          call do_advection_diffusion_rain(s, dt, ierr)
-      case (method_instant_legacy)
-         legacy = .true.
-         call prepare_legacy(s, ierr)
-         if (ierr == 0) call do_instant_rain(s, ierr)
-      case (method_bottom_up_legacy)
-         legacy = .true.
-         call prepare_legacy(s, ierr)
-         if (ierr == 0) call do_bottom_up_rain(s, ierr)
       case default
-         ierr = 1
+         ierr = -1  ! configuration error: the run ends
          write(*,'(a)') ' element_sedimentation: unknown element_sedimentation_method ''' // &
             trim(s% element_sedimentation_method) // ''''
          write(*,'(a)') '    valid options are ''' // method_advection_diffusion // ''' (default), ''' // &
-            method_instant // ''', ''' // method_bottom_up // ''', ''' // &
-            method_instant_legacy // ''' and ''' // method_bottom_up_legacy // ''''
+            method_instant // ''' and ''' // method_bottom_up // ''''
       end select
       if (ierr /= 0) return
-
-      ! the legacy methods report in their own way; add the common summary line so that
-      ! every method can be followed (and counted) the same way
-      if (legacy .and. s% element_sedimentation_report) then
-         max_dx = maxval(abs(s% xa(i_sed,1:s% nz) - xa_entry(i_sed,1:s% nz)))
-         mass_moved = 0d0
-         do k = 1, s% nz
-            mass_moved = mass_moved + s% dm(k)*max(s% xa(i_sed,k) - xa_entry(i_sed,k), 0d0)
-         end do
-         if (max_dx > 0d0) then
-            write(*,'(a,i0,a,1pd10.3,a,1pd10.3)') ' element_sedimentation: model ', s% model_number, &
-               ' legacy ' // trim(s% element_sedimentation_method) // ' max_dX ', max_dx, ' mass_moved[g] ', mass_moved
-         else
-            write(*,'(a,i0,a)') ' element_sedimentation: model ', s% model_number, &
-               ': legacy ' // trim(s% element_sedimentation_method) // ' moved nothing, nothing to do'
-         end if
-      end if
 
       ! energy carried by the moved species, from the composition change of the step
       ! (any method)
@@ -232,17 +197,12 @@ contains
 
    subroutine shutdown_element_sedimentation()
       ! free the phase diagram and forget the species bookkeeping (called from init.f90)
-      call shutdown_element_sedimentation_legacy()
       call free_phase_diagram(pd)
       if (allocated(A)) deallocate(A)
       if (allocated(eps_enthalpy_flux)) deallocate(eps_enthalpy_flux)
       enthalpy_flux_valid = .false.
       i_sed = 0
       i_partner = 0
-      legacy_i_sed = 0
-      legacy_i_partner = 0
-      legacy_species = 0
-      legacy_pd_load_count = -1
       last_attempt_model_number = -1
       last_attempt_max_change = 0d0
    end subroutine shutdown_element_sedimentation
@@ -283,7 +243,6 @@ contains
                trim(s% element_sedimentation_phase_diagram) // ''': ' // trim(phase_diagram_error_message(ierr))
             return
          end if
-         pd_load_count = pd_load_count + 1
          write(*,'(a,i0,a,i0,a)') ' element_sedimentation: loaded phase diagram ''' // &
             trim(s% element_sedimentation_phase_diagram) // ''' (', pd% n_points, ' points, ', &
             pd% num_unique_P, ' pressure blocks)'
@@ -339,35 +298,6 @@ contains
             ''' is not in the current nuclear net'
       end if
    end subroutine resolve_species
-
-
-   subroutine prepare_legacy(s, ierr)
-      ! one-time notice and (re)initialization of the legacy module
-      type (star_info), pointer :: s
-      integer, intent(out) :: ierr
-      ierr = 0
-      if (.not. legacy_notice_printed) then
-         write(*,'(a)') ' element_sedimentation: NOTE: element_sedimentation_method = ''' // &
-            trim(s% element_sedimentation_method) // ''' is the old implementation kept for comparison;'
-         write(*,'(a)') '    ''' // method_advection_diffusion // ''' is the recommended method, ''' // &
-            method_instant // ''' and ''' // method_bottom_up // ''' its instant limits.'
-         legacy_notice_printed = .true.
-      end if
-      ! the legacy module keeps its own copy of the phase diagram: re-initialize it when the
-      ! species or the phase diagram (file, temperature shift, extrapolation) changed
-      if (legacy_i_sed /= i_sed .or. legacy_i_partner /= i_partner .or. legacy_species /= s% species &
-            .or. legacy_pd_load_count /= pd_load_count) then
-         call init_element_sedimentation_legacy(pd, i_sed, i_partner, A, ierr)
-         if (ierr /= 0) then
-            write(*,'(a)') ' element_sedimentation: init_element_sedimentation_legacy failed'
-            return
-         end if
-         legacy_i_sed = i_sed
-         legacy_i_partner = i_partner
-         legacy_species = s% species
-         legacy_pd_load_count = pd_load_count
-      end if
-   end subroutine prepare_legacy
 
 
    ! ---------------------------------------------------------------------------

@@ -13,10 +13,11 @@ to <out>/results.json. The exit code is nonzero when a run did not reach the req
 age (unless --allow-failure).
 
 Options
-  --methods a,b,c     methods to run (default: all five)
+  --methods a,b,c     methods to run (default: all three)
   --max-age YEARS     stop age (default: taken from the example's inlist)
   --max-model N       max_model_number (default: as in the example)
-  --load-model FILE   start from this saved model instead of the example's one
+  --load-model FILE   start from this saved model instead of the example's one (a path,
+                      or the name of a model file in the example directory)
   --threads N         OMP_NUM_THREADS per run (default 4); runs are sequential
   --parallel          run all methods at once (needs enough cores)
   --out DIR           output directory (default: compare_methods_out next to the example)
@@ -31,8 +32,7 @@ import subprocess
 import sys
 import time
 
-METHODS = ['advection_diffusion_rain', 'instant_rain', 'bottom_up_rain',
-           'instant_rain_legacy', 'bottom_up_rain_legacy']
+METHODS = ['advection_diffusion_rain', 'instant_rain', 'bottom_up_rain']
 SKIP = {'LOGS', 'png', 'photos', 'star', 'compare_methods_out', '.DS_Store'}
 
 
@@ -65,7 +65,7 @@ def parse_args(argv):
         elif a == '--max-model':
             opts['max_model'] = int(argv[i + 1]); i += 2
         elif a == '--load-model':
-            opts['load_model'] = os.path.abspath(argv[i + 1]); i += 2
+            opts['load_model'] = argv[i + 1]; i += 2
         elif a == '--threads':
             opts['threads'] = int(argv[i + 1]); i += 2
         elif a == '--parallel':
@@ -86,6 +86,14 @@ def parse_args(argv):
         sys.exit(__doc__)
     if opts['out'] is None:
         opts['out'] = os.path.join(os.path.dirname(example), 'compare_methods_out')
+    if opts['load_model']:
+        # a path relative to the current directory, or a file name in the example directory
+        path = opts['load_model']
+        if not os.path.isfile(path) and os.path.isfile(os.path.join(example, path)):
+            path = os.path.join(example, path)
+        if not os.path.isfile(path):
+            sys.exit('--load-model: %s is neither a file nor a file in %s' % (opts['load_model'], example))
+        opts['load_model'] = os.path.abspath(path)
     return example, opts
 
 

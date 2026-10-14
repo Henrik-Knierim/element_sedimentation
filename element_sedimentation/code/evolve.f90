@@ -11,6 +11,15 @@
                      s% energy_start(k) = s% energy(k)
                   end do
                   call do_element_sedimentation(s, dt, ierr)
+                  if (ierr < 0) then
+                     ! configuration error (unknown method, phase diagram, species): no retry can help
+                     write(*,'(a)') ' do_step_part2: do_element_sedimentation: configuration error, terminating'
+                     termination_code_str(t_xtra1) = 'element_sedimentation configuration error'
+                     s% termination_code = t_xtra1
+                     s% result_reason = nonzero_ierr
+                     do_step_part2 = terminate
+                     return
+                  end if
                   if (failed('do_element_sedimentation')) return
                   call set_vars_if_needed(s, dt, 'after element sedimentation', ierr)
                   if (failed('set_vars_if_needed after element sedimentation')) return

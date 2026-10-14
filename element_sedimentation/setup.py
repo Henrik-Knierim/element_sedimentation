@@ -60,8 +60,13 @@ NEW_SOURCES = (
     "sedimentation_miscibility.f90",
     "sedimentation_energy.f90",
     "sedimentation_overturn.f90",
-    "element_sedimentation_legacy.f90",
     "element_sedimentation.f90",
+)
+
+# sources of earlier versions of the extension that no longer exist; install and uninstall
+# remove them from star/private so that an updated checkout leaves no stray file behind
+RETIRED_SOURCES = (
+    "element_sedimentation_legacy.f90",  # the old instant_rain / bottom_up_rain, removed 2026-10-14
 )
 
 INSTALL_INFO: dict[str, dict] = {
@@ -520,12 +525,25 @@ def check_snippets_apply(files: list[InstallationFile] | None = None) -> None:
                          + "\n   ".join(problems))
 
 
+def retired_sources_present() -> list[Path]:
+    private = mesa_dir() / "star" / "private"
+    return [private / name for name in RETIRED_SOURCES if (private / name).is_file()]
+
+
+def remove_retired_sources() -> None:
+    """Remove sources of earlier versions of the extension from star/private."""
+    for path in retired_sources_present():
+        path.unlink()
+        print(f"removed the retired source {path}")
+
+
 def do_install_files(force: bool) -> None:
     check_backup_consistency(force)
     check_snippets_apply()
     for f in all_files():
         print(f"installing {f.name}")
         f.install(force)
+    remove_retired_sources()
 
 
 def do_uninstall_files(force: bool) -> None:
@@ -533,6 +551,7 @@ def do_uninstall_files(force: bool) -> None:
     for f in all_files():
         print(f"uninstalling {f.name}")
         f.uninstall(force)
+    remove_retired_sources()
 
 
 def cmd_install(args) -> None:
@@ -699,6 +718,9 @@ def cmd_status(args) -> int:
             n_stale += not current
             state = "present (up to date)" if current else "present (STALE)"
         print(f"   {f.name:40s} {state}")
+    for path in retired_sources_present():
+        n_stale += 1
+        print(f"   {path.name:40s} present (RETIRED, no longer part of the extension)")
     n_patch_files = sum(1 for f in files if not f.replace)
     print()
     if n_patched == 0 and n_present == 0:

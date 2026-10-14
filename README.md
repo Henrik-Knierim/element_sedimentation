@@ -48,7 +48,7 @@ into `$MESA_DIR/star/defaults/controls.defaults`):
 | control | default |
 |---|---|
 | `do_element_sedimentation` | `.false.` |
-| `element_sedimentation_method` | `'advection_diffusion_rain'` (or `'instant_rain'`, `'bottom_up_rain'`, `'*_legacy'`) |
+| `element_sedimentation_method` | `'advection_diffusion_rain'` (or `'instant_rain'`, `'bottom_up_rain'`) |
 | `element_sedimentation_chemical_species` | `'he4'` |
 | `element_sedimentation_partner_species` | `'h1'` |
 | `element_sedimentation_phase_diagram` | `''` (CSV: `y_lo, y_hi, T [K], P [Mbar]`) |
@@ -87,7 +87,6 @@ element_sedimentation/
       sedimentation_energy.f90         energy carried by the moved species (enthalpy flux and its divergence)
       sedimentation_overturn.f90       instantaneous mixing of layers left convectively unstable
       element_sedimentation.f90        MESA driver (do_element_sedimentation, finish_element_sedimentation, shutdown_element_sedimentation)
-      element_sedimentation_legacy.f90 old instant_rain / bottom_up_rain algorithms
       makefile_base, controls.defaults, star_controls.inc, ctrls_io.f90,
       star_data_step_work.inc, alloc.f90, hydro_energy.f90, evolve.f90, init.f90   patch snippets
    test/                    unit tests (./mk, ./rn, ./clean), data/Schoettler+2018.csv,

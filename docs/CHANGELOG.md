@@ -5,16 +5,17 @@ the open points.
 
 ## 2026-10: refactor into modules, advection-diffusion transport, mixing and energy
 
-Branch `develop`, five commits (split, unit tests, installer, docs, mixing/energy).
+Branch `develop`; commits: split, unit tests, installer, docs, mixing/energy, the other
+methods with the Saturn example, removal of the old implementations.
 
 ### Architecture
 - The 3485-line `element_sedimentation.f90` is split into library modules without MESA
   dependency, `advection_diffusion` (solver), `sedimentation_phase_diagram` (CSV reader,
   interpolation), `sedimentation_miscibility` (composition arithmetic, per-cell limits),
   `sedimentation_energy` (energy carried by the moved species) and `sedimentation_overturn`
-  (mixing of unstable layers), plus the MESA driver `element_sedimentation` and
-  `element_sedimentation_legacy` with the old `instant_rain` and `bottom_up_rain`
-  algorithms, unchanged.
+  (mixing of unstable layers), plus the MESA driver `element_sedimentation`. The old
+  `instant_rain` and `bottom_up_rain` algorithms were kept in `element_sedimentation_legacy`
+  for the comparison below and removed afterwards (2026-10-14).
 - The two components of the phase diagram are the controls
   `element_sedimentation_chemical_species` and `element_sedimentation_partner_species`;
   atomic weights come from `chem_isos% W` for every species in the net. The old code had
@@ -31,7 +32,9 @@ Branch `develop`, five commits (split, unit tests, installer, docs, mixing/energ
   `sum(xa) = 1` and every species conserves its mass; both are checked after every step.
 - Damping (`element_sedimentation_maximum_dXi_per_cell`, retry damping) blends from the
   mixing-only state. Every failure returns a named error with a diagnostic block and makes
-  MESA retry the step; nothing calls `stop`.
+  MESA retry the step; nothing calls `stop`. Configuration errors (an unknown method, a
+  phase diagram that cannot be loaded, a species missing from the net) end the run at once
+  with the message instead of a retry cascade (2026-10-14).
 
 ### Mixing
 - `element_sedimentation_replace_mesa_mixing` (default true): in steps where the module acts
@@ -71,8 +74,9 @@ Branch `develop`, five commits (split, unit tests, installer, docs, mixing/energ
   filling). `'bottom_up_rain'` repeats it with the limits re-evaluated after every
   transfer (`element_sedimentation_transfer_rounds`), which is what the old bottom-up
   sweep was for.
-- The old implementations remain selectable as `'instant_rain_legacy'` and
-  `'bottom_up_rain_legacy'` for comparison. Their known problems: the deposit region
+- The old implementations were kept as `'instant_rain_legacy'` and `'bottom_up_rain_legacy'`
+  for the comparison (`docs/index.md`, section 8) and then removed, together with
+  `element_sedimentation_legacy.f90`. Their known problems: the deposit region
   and the helium ocean are found by heuristics, the He-rich limit is not enforced when
   depositing, the bottom-up sweep costs n_z evaluations per step, and the bottom-up
   variant leaves MESA's convection on, which refills the raining cells every step; with

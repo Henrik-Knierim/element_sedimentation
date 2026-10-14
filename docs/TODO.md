@@ -128,5 +128,3 @@
 ## Code and project
 - [ ] Modules other than `star` that use `star_info` (binary, astero) are only rebuilt by
       the full `install`; `soft_install` rebuilds `star_data` and `star`.
-- [ ] Legacy `bottom_up_rain`: `dXi` can exceed `element_sedimentation_maximum_dXi_per_cell`
-      during core saturation (old known issue, kept with the legacy code).

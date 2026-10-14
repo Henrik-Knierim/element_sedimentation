@@ -49,11 +49,6 @@
       !   moves nothing (at most ``element_sedimentation_transfer_rounds`` rounds). The
       !   limits depend on the composition only through the other species, so this
       !   differs from ``'instant_rain'`` only where their ratios vary.
-      ! + ``'instant_rain_legacy'``, ``'bottom_up_rain_legacy'`` : the old implementations
-      !   of the two, kept for comparison (``element_sedimentation_legacy.f90``): one
-      !   global transfer with heuristics for the deposit region, or the same repeated
-      !   for every cell range k:nz from the centre outward. They use neither the caps,
-      !   nor the overturn, nor the mixing takeover.
 
       ! ::
 
@@ -278,12 +273,8 @@
       ! If true, MESA's mixing coefficients (``D_mix`` and ``sig``) are set to zero on
       ! both faces of every cell that was inside the immiscibility gap before the
       ! transport, for the rest of the step. Also sets ``do_conv_premix = .false.``.
-      ! Used by ``'advection_diffusion_rain'``, ``'instant_rain'`` and ``'bottom_up_rain'``,
-      ! and only if ``element_sedimentation_replace_mesa_mixing = .false.`` (which switches
-      ! off all of MESA's composition mixing in the steps in which the module acts). The
-      ! legacy methods ignore it: ``'instant_rain_legacy'`` always sets ``D_mix = 0`` in the
-      ! immiscible cells and switches off ``do_conv_premix``; ``'bottom_up_rain_legacy'``
-      ! never changes the mixing.
+      ! Only used if ``element_sedimentation_replace_mesa_mixing = .false.`` (which switches
+      ! off all of MESA's composition mixing in the steps in which the module acts).
 
       ! ::
 
@@ -329,9 +320,7 @@
       ! until the face above them is stable, e.g. down to the centre of an interior of
       ! uniform composition. ``gradr`` and ``grada`` are those of the start of the step.
       ! Faces that are only thermohaline-unstable (``gradr < grada + B``, ``B < 0``) are left
-      ! to MESA. Used by ``'advection_diffusion_rain'``, ``'instant_rain'`` and
-      ! ``'bottom_up_rain'`` (the legacy methods ignore it). The report line shows the
-      ! number of faces and blocks mixed.
+      ! to MESA. The report line shows the number of faces and blocks mixed.
 
       ! ::
 
@@ -354,8 +343,7 @@
       ! the cells that receive hydrogen (the core, by ~100 K per 0.3 % of helium) and
       ! heats the ones that receive helium. With this control every composition change
       ! of the species in a mixed region goes through the module and its energy terms.
-      ! Used by ``'advection_diffusion_rain'``, ``'instant_rain'`` and ``'bottom_up_rain'``
-      ! (the legacy methods ignore it). Note that in steady-state mode the
+      ! Note that in steady-state mode the
       ! module homogenizes every region connected by ``D_mix > 0`` at once; set it to
       ! false in models where slow mixing processes (thermohaline, rotational) of the
       ! species matter, or use ``element_sedimentation_solve_to_steady_state = .false.``.

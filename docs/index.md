@@ -20,7 +20,6 @@ element_sedimentation/code/
    sedimentation_energy.f90         energy carried by the moved species: face flow rates, enthalpy flux, its divergence (no MESA dependency)
    sedimentation_overturn.f90       instantaneous mixing of layers left convectively unstable, pool-adjacent-violators (no MESA dependency)
    element_sedimentation.f90        MESA-facing driver: builds the problem from star_info, applies the result, Ledoux test, energy terms
-   element_sedimentation_legacy.f90 the old implementations ('instant_rain_legacy', 'bottom_up_rain_legacy')
    <patch snippets>                 makefile_base, controls.defaults, star_controls.inc, ctrls_io.f90,
                                     star_data_step_work.inc, alloc.f90, hydro_energy.f90, evolve.f90, init.f90
 element_sedimentation/setup.py      installer (see section 6)
@@ -45,7 +44,6 @@ do_element_sedimentation(s, dt, ierr)                         element_sedimentat
             damping (change limit), overturn_unstable_layers (Ledoux-unstable faces, EOS)   sedimentation_overturn.f90
             post checks (bounds, sum = 1, species masses), MESA's mixing switched off for the step, report
       'instant_rain' / 'bottom_up_rain' -> the same path, adv_diff_instant_transfer instead of adv_diff_integrate
-      'instant_rain_legacy' / 'bottom_up_rain_legacy' -> element_sedimentation_legacy.f90
    enthalpy_flux_heating (flow rates from the composition change, partial enthalpies from the EOS)
    need_to_setvars = .true.
 set_vars_if_needed                                            evolve.f90 snippet
@@ -274,8 +272,12 @@ retries unless that limit is relaxed.
 
 On a solver failure the driver prints a diagnostic block (model number, error, message,
 steps, Newton iterations, last dt, timescales, residual, and for the failing cell $X$,
-floor, cap, $\sigma$, $w$, $P$, $T$), restores `s% xa`, and returns `ierr /= 0` so that
-MESA retries the step. After every implicit step the passive species of each cell are
+floor, cap, $\sigma$, $w$, $P$, $T$), restores `s% xa`, and returns `ierr > 0` so that
+MESA retries the step. Configuration errors (an unknown `element_sedimentation_method`, a
+phase diagram that cannot be loaded, a species missing from the net) return `ierr < 0`,
+and the `evolve.f90` snippet then ends the run (termination code
+`element_sedimentation configuration error`) instead of retrying down to the minimum time
+step. After every implicit step the passive species of each cell are
 rescaled to exactly $1 - X_i$ (in exact arithmetic they already are; in floating point they
 miss it by the round-off floor of the accepted step, ~ epsilon times the ratio of the step
 to the fastest cell timescale: ~1e-11 in the example, up to ~1e-6 in a forced-rain test;
@@ -289,7 +291,7 @@ less than `1e-8` relative.
 | control | default | meaning |
 |---|---|---|
 | `do_element_sedimentation` | `.false.` | switch |
-| `element_sedimentation_method` | `'advection_diffusion_rain'` | or `'instant_rain'`, `'bottom_up_rain'`, `'instant_rain_legacy'`, `'bottom_up_rain_legacy'` (section 8) |
+| `element_sedimentation_method` | `'advection_diffusion_rain'` | or `'instant_rain'`, `'bottom_up_rain'` (section 8) |
 | `element_sedimentation_transfer_rounds` | `5` | `'bottom_up_rain'`: maximum number of transfers with re-evaluated limits per step |
 | `element_sedimentation_chemical_species` | `'he4'` | sedimenting isotope |
 | `element_sedimentation_partner_species` | `'h1'` | other component of the phase diagram |
@@ -307,7 +309,7 @@ less than `1e-8` relative.
 | `element_sedimentation_maximum_dXi_per_cell` | `-1d0` | ceiling on the change of $X_i$ caused by rain per cell and step, relative to the mixing-only state (off if negative) |
 | `element_sedimentation_retry_change_factor` | `0.5d0` | on a MESA retry of the same model, limit the change per cell to this factor times the previous attempt's largest change (off if <= 0) |
 | `element_sedimentation_cell_threshold_for_precipitation` | `1` | minimum number of saturated cells (at or above the He-poor limit) for the module to act |
-| `element_sedimentation_suppress_mixing_in_immiscible_regions` | `.false.` | zero `D_mix`/`sig` around cells in the gap; disables `do_conv_premix` (not for the legacy methods: `instant_rain_legacy` always does this, `bottom_up_rain_legacy` never) |
+| `element_sedimentation_suppress_mixing_in_immiscible_regions` | `.false.` | zero `D_mix`/`sig` around cells in the gap; disables `do_conv_premix` (only used if `element_sedimentation_replace_mesa_mixing` is false) |
 | `element_sedimentation_replace_mesa_mixing` | `.true.` | in steps where the module acts, set `D_mix` and `sig` to zero after its transport (MESA's mixing would undo the rain) |
 | `element_sedimentation_overturn_unstable_layers` | `.true.` | mix layers the transport leaves Ledoux-unstable (heavy deposit on lighter material) at once, every species mass-weighted |
 | `element_sedimentation_act_on_mixing_contrast` | `.true.` | also act (mixing only, with the energy terms) in steps where a mixed face separates cells of different species mass fraction; MESA's mixing carries no enthalpy flux |
@@ -453,17 +455,6 @@ unstable layers, the energy terms, the checks, the mixing takeover and the repor
   rain because of what was deposited below them. The limits depend on the composition
   only through the other species (section 2), so the rounds change the result only
   where the ratios of the other species vary, e.g. across a heavy-element gradient.
-* **`'instant_rain_legacy'`, `'bottom_up_rain_legacy'`**
-  (`element_sedimentation_legacy.f90`): the previous implementations, kept unchanged
-  for comparison. They determine the deposit region by heuristics (the first unmixed
-  cell more than 5 % of the mass below the rain region), spread the drained helium
-  uniformly over it without regard to the He-rich limit, detect an existing helium
-  ocean by a saturation test, apply the counter-flow by explicit sub-steps, and the
-  bottom-up variant repeats the whole transfer for every cell range $k:n_z$ from the
-  centre outward (cost $\propto n_z^2$). They use neither the overturn nor the mixing
-  takeover (`instant_rain_legacy` zeroes `D_mix` in the immiscible cells itself,
-  `bottom_up_rain_legacy` never touches the mixing). A one-time notice is printed when
-  they are selected.
 
 The integration test `test/integration/compare_methods.py` runs an example with several
 methods and compares them (section 7).
@@ -474,7 +465,12 @@ Jupiter example from the saved model at 4.7 Gyr to 5 Gyr (rain from 4.75 Gyr) an
 example from its initial model to 5 Gyr (rain from 2.35 Gyr; the gap reaches the centre at
 2.78 Gyr and a helium ocean forms); baselines without rain for the differences at equal age.
 Wall time per MESA step with 2 threads and five runs in parallel; "module" is the module's
-own wall time in a step in which it acted.
+own wall time in a step in which it acted. The two old implementations, `instant_rain_legacy`
+and `bottom_up_rain_legacy` (`element_sedimentation_legacy.f90`, in the repository up to
+commit 0be439e), determined the deposit region by heuristics, spread the drained helium
+uniformly over it without regard to the He-rich limit, and used neither the overturn nor
+the mixing takeover; they were removed after this comparison and their rows are kept for
+the record.
 
 | method | Jupiter: steps to 5 Gyr, s/step, module s | T_eff − base, Y_env, Y_centre at 5 Gyr | Saturn: reached, retries | Saturn at 5 Gyr: T_eff − base, L/L_base, Y_env, Y_centre |
 |---|---|---|---|---|
@@ -492,21 +488,23 @@ own wall time in a step in which it acted.
 * Cost: the module takes 0.04 to 0.2 s of a 0.15 to 0.3 s MESA step in rain steps; the
   instant transfer is a factor 2 to 4 cheaper than the solver in Saturn's thick rain
   region (0.04 vs 0.2 s) and the same on Jupiter, where the structure solve dominates.
-  The legacy methods are not cheaper.
-* Saturn is the case the legacy methods never survived: the ocean forms over ~150 Myr
-  (per-cell change limit 0.02), the envelope drains to Y = 0.22, the centre ends at
-  Y = 0.96 and 1900 K warmer than without rain, and the planet is 36 % more luminous
-  and 4.4 K warmer at 5 Gyr, the Stevenson & Salpeter effect. The legacy instant method
-  fails when its uniform deposit pushes a cell outside [0, 1]; the legacy bottom-up
-  method, with MESA's mixing left on, never drains the envelope (Jupiter: T_eff +1.4 to
-  +12 K from the futile refill cycle) and fails first.
+  The old implementations were not cheaper.
+* Saturn is the case the old implementations never survived: the ocean forms over
+  ~150 Myr (per-cell change limit 0.02), the envelope drains to Y = 0.22, the centre
+  ends at Y = 0.96 and 1900 K warmer than without rain, and the planet is 36 % more
+  luminous and 4.4 K warmer at 5 Gyr, the Stevenson & Salpeter effect. The old instant
+  method failed when its uniform deposit pushed a cell outside [0, 1]; the old bottom-up
+  method, with MESA's mixing left on, never drained the envelope (Jupiter: T_eff +1.4 to
+  +12 K from the futile refill cycle) and failed first.
 * Upsides and downsides. Solver: the only method with a time scale (velocity laws,
   time-accurate runs, the pseudo-time of the steady state as a diagnostic) at the price
   of a Newton solve per step and a residual tolerance. Instant: no velocity, no
   tolerance, a few sweeps, trivially robust, but the infinite-velocity limit only, with
   the deviations listed above. Bottom-up: adds the limit re-evaluation for models whose
-  heavy-element ratios vary; costs nothing extra when they do not. Legacy: kept only to
-  reproduce old runs.
+  heavy-element ratios vary; costs nothing extra when they do not.
 
 The plots `movies/jupiter_methods.png` and `movies/saturn_methods.png` show T_eff, the
-helium of the envelope and the energies of all five methods against the baselines.
+helium of the envelope and the energies of all five methods against the baselines, and
+`movies/final_Y_profiles.png` the helium profiles at 5 Gyr (the three methods lie on top
+of each other on Saturn; on Jupiter the solver leaves the envelope 0.004 richer in helium
+than the instant limit, the diffusive smoothing inside the rain region).
