@@ -48,7 +48,7 @@ into `$MESA_DIR/star/defaults/controls.defaults`):
 | control | default |
 |---|---|
 | `do_element_sedimentation` | `.false.` |
-| `element_sedimentation_method` | `'advection_diffusion_rain'` (legacy: `'instant_rain'`, `'bottom_up_rain'`) |
+| `element_sedimentation_method` | `'advection_diffusion_rain'` (or `'instant_rain'`, `'bottom_up_rain'`, `'*_legacy'`) |
 | `element_sedimentation_chemical_species` | `'he4'` |
 | `element_sedimentation_partner_species` | `'h1'` |
 | `element_sedimentation_phase_diagram` | `''` (CSV: `y_lo, y_hi, T [K], P [Mbar]`) |
@@ -70,6 +70,7 @@ into `$MESA_DIR/star/defaults/controls.defaults`):
 | `element_sedimentation_overturn_unstable_layers` | `.true.` |
 | `element_sedimentation_act_on_mixing_contrast` | `.true.` |
 | `element_sedimentation_mixing_contrast_tolerance` | `1d-6` |
+| `element_sedimentation_transfer_rounds` | `5` |
 | `element_sedimentation_heating` | `.true.` |
 | `element_sedimentation_include_enthalpy_flux` | `.true.` |
 | `element_sedimentation_report` | `.false.` |
@@ -89,12 +90,14 @@ element_sedimentation/
       element_sedimentation_legacy.f90 old instant_rain / bottom_up_rain algorithms
       makefile_base, controls.defaults, star_controls.inc, ctrls_io.f90,
       star_data_step_work.inc, alloc.f90, hydro_energy.f90, evolve.f90, init.f90   patch snippets
-   test/                    unit tests (./mk, ./rn, ./clean), data/Schoettler+2018.csv
+   test/                    unit tests (./mk, ./rn, ./clean), data/Schoettler+2018.csv,
+                            integration/compare_methods.py (runs an example with several methods)
    backup/                  pristine MESA files (created by setup.py, not in git)
 docs/index.md               physics, numerics, controls, installation, tests
 docs/CHANGELOG.md           what changed and why (2026-10 refactor)
 docs/TODO.md                open points
-planet_helium_rain/         example work directory
+planet_helium_rain/         example work directory (1 M_J)
+saturn_helium_rain/         example work directory (1 M_Saturn; the helium gap reaches deeper)
 ```
 
 See `docs/index.md` for the equations, the numerical method and the details of the

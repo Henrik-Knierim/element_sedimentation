@@ -25,6 +25,7 @@
          logical :: element_sedimentation_overturn_unstable_layers
          logical :: element_sedimentation_act_on_mixing_contrast
          real(dp) :: element_sedimentation_mixing_contrast_tolerance
+         integer :: element_sedimentation_transfer_rounds
          logical :: element_sedimentation_heating
          logical :: element_sedimentation_include_enthalpy_flux
          logical :: element_sedimentation_report

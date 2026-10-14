@@ -19,6 +19,8 @@
 # Fortran module files
 *.mod
 !1_M_J_9_kb_per_mu.mod
+!1_M_J_4.7Gyr_no_rain.mod
+!1_M_Sat_*.mod
 *.smod
 
 # Compiled Static libraries

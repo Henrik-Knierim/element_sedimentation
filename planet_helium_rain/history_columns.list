@@ -1069,3 +1069,11 @@
 
    !## timing
       !elapsed_time ! time since start of run (seconds)
+
+! element_sedimentation: helium of the envelope and centre, energies (used by test/integration/compare_methods.py)
+      surface he4
+      center he4
+      total_internal_energy
+      total_gravitational_energy
+      total_energy
+      num_retries

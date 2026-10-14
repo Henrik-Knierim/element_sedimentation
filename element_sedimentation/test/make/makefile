@@ -26,7 +26,7 @@ CODE_DIR = ../../code
 SRC_DIR = ../src
 
 MODULE_SRCS = advection_diffusion.f90 sedimentation_phase_diagram.f90 sedimentation_miscibility.f90 sedimentation_energy.f90 sedimentation_overturn.f90
-TEST_SRCS = test_support.f90 test_advection_diffusion.f90 test_phase_diagram.f90 test_miscibility.f90 test_sedimentation_energy.f90 test_sedimentation_overturn.f90 tester.f90
+TEST_SRCS = test_support.f90 test_advection_diffusion.f90 test_instant_transfer.f90 test_phase_diagram.f90 test_miscibility.f90 test_sedimentation_energy.f90 test_sedimentation_overturn.f90 tester.f90
 
 SRCS = $(MODULE_SRCS) $(TEST_SRCS)
 OBJS = $(patsubst %.f90,%.o,$(SRCS))
@@ -78,8 +78,9 @@ vpath %.f90 $(CODE_DIR) $(SRC_DIR)
 # module dependencies (compile order); listed explicitly instead of using makedepf90
 sedimentation_miscibility.o : sedimentation_phase_diagram.o
 test_advection_diffusion.o : advection_diffusion.o test_support.o
+test_instant_transfer.o : advection_diffusion.o test_support.o
 test_phase_diagram.o : sedimentation_phase_diagram.o test_support.o
 test_miscibility.o : sedimentation_miscibility.o sedimentation_phase_diagram.o test_support.o
 test_sedimentation_energy.o : sedimentation_energy.o test_support.o
 test_sedimentation_overturn.o : sedimentation_overturn.o test_support.o
-tester.o : test_support.o test_advection_diffusion.o test_phase_diagram.o test_miscibility.o test_sedimentation_energy.o test_sedimentation_overturn.o
+tester.o : test_support.o test_advection_diffusion.o test_instant_transfer.o test_phase_diagram.o test_miscibility.o test_sedimentation_energy.o test_sedimentation_overturn.o

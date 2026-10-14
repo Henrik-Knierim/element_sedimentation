@@ -61,6 +61,39 @@ Branch `develop`, five commits (split, unit tests, installer, docs, mixing/energ
   the `dedt` and the `eps_grav` form without retries, T_eff within a few K of the run
   without rain. The latent heat of demixing is still missing (TODO).
 
+### The other methods (`'instant_rain'`, `'bottom_up_rain'`)
+- Both re-implemented on the same floors, caps, counter-flow, damping, overturn, energy
+  terms, checks and mixing takeover as the solver; only the transport core differs.
+  `'instant_rain'` is the steady state for infinitely fast rain, computed directly by
+  `adv_diff_instant_transfer` in the solver module (drain to the floors, fill the cells
+  below up to their limits, back-fill to the caps when the way down is blocked, which
+  makes a helium ocean grow upward from the centre; mixed regions settle to a water
+  filling). `'bottom_up_rain'` repeats it with the limits re-evaluated after every
+  transfer (`element_sedimentation_transfer_rounds`), which is what the old bottom-up
+  sweep was for.
+- The old implementations remain selectable as `'instant_rain_legacy'` and
+  `'bottom_up_rain_legacy'` for comparison. Their known problems: the deposit region
+  and the helium ocean are found by heuristics, the He-rich limit is not enforced when
+  depositing, the bottom-up sweep costs n_z evaluations per step, and the bottom-up
+  variant leaves MESA's convection on, which refills the raining cells every step; with
+  the energy terms this futile cycle pumps energy (T_eff +33 K in the Jupiter example).
+- New: a Saturn example (`saturn_helium_rain`), the integration test
+  `test/integration/compare_methods.py` that runs an example with several methods and
+  compares them, and unit tests of the instant transfer.
+- Found with the Saturn example, where the helium gap reaches the centre and a helium
+  ocean forms: MESA's `dedt` work term with velocity time centering charges a cell that
+  contracts within one step only half its P dV work, which cooled the forming ocean
+  from 6700 K to 2900 K and crashed every method; the examples now run without
+  velocity time centering (`docs/index.md`, Physics). The retry damping now scales the
+  allowed change with the time-step ratio of the retry (otherwise the heating rate of
+  the step stays constant through a retry cascade), and it limits the whole change of
+  the step relative to its start rather than to the mixing-only state.
+- An independent review of the instant transfer (three reviewers, adversarial
+  verification) led to: no limits in mixing-only steps, no stray diffusion in the
+  counter-flow of the instant transfer, floors acting only on cells that advect, exact
+  filling to the cap, and the instant methods ignoring the velocity; the remaining
+  documented deviations from the solver are listed in `docs/index.md`, section 8.
+
 ### Installer, tests, documentation
 - `setup.py` rewritten: anchor-based patching of a pristine MESA with backups, `check`
   (anchors, snippets, control consistency), `status`, `install`, `soft_install`

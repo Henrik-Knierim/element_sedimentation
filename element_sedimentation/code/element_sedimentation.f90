@@ -69,6 +69,8 @@ module element_sedimentation
    character(len=*), parameter :: method_advection_diffusion = 'advection_diffusion_rain'
    character(len=*), parameter :: method_instant = 'instant_rain'
    character(len=*), parameter :: method_bottom_up = 'bottom_up_rain'
+   character(len=*), parameter :: method_instant_legacy = 'instant_rain_legacy'
+   character(len=*), parameter :: method_bottom_up_legacy = 'bottom_up_rain_legacy'
    character(len=*), parameter :: velocity_constant = 'constant'
 
    real(dp), parameter :: sum_renormalize_tol = 1d-10  ! renormalize a cell when |sum xa - 1| exceeds this
@@ -77,6 +79,7 @@ module element_sedimentation
    real(dp), parameter :: min_one_minus_x = 1d-30      ! floor of (1 - x_i) in the passive counter-flow scale
    real(dp), parameter :: passive_sum_error_tol = 1d-3 ! error when the passive species miss 1 - x_i by more after a step
    real(dp), parameter :: saturation_tol = 1d-10       ! a cell counts as saturated if x_i >= x_lo - saturation_tol
+   real(dp), parameter :: transfer_round_tol = 1d-12   ! bottom_up_rain stops its rounds when a transfer moves less than this
    ! finite differences of the EOS for the partial specific enthalpies (enthalpy_flux_heating)
    real(dp), parameter :: dxa_eos = 1d-3      ! composition step
    real(dp), parameter :: dxa_eos_min = 1d-6  ! below this abundance of both species the derivative is not needed
@@ -99,6 +102,7 @@ module element_sedimentation
    ! mass fraction of the sedimenting species in the last attempt and the model it belongs to
    integer :: last_attempt_model_number = -1
    real(dp) :: last_attempt_max_change = 0d0
+   real(dp) :: last_attempt_dt = 0d0
    ! energy carried by the moved species (element_sedimentation_include_enthalpy_flux):
    ! heating rate of every cell from the divergence of the enthalpy flux of the last
    ! call, added to eps_element_sedimentation by finish_element_sedimentation
@@ -118,9 +122,14 @@ contains
       real(dp), intent(in) :: dt
       integer, intent(out) :: ierr
       real(dp), allocatable :: xa_entry(:,:)
+      integer(8) :: clock_start, clock_end, clock_rate
+      real(dp) :: seconds, max_dx, mass_moved
+      integer :: k
+      logical :: legacy
 
       ierr = 0
       enthalpy_flux_valid = .false.
+      call system_clock(clock_start, clock_rate)
 
       call initialize(s, ierr)
       if (ierr /= 0) then
@@ -132,13 +141,16 @@ contains
       allocate(xa_entry(s% species, s% nz))
       xa_entry(1:s% species,1:s% nz) = s% xa(1:s% species,1:s% nz)
 
+      legacy = .false.
       select case (trim(s% element_sedimentation_method))
-      case (method_advection_diffusion)
+      case (method_advection_diffusion, method_instant, method_bottom_up)
          call do_advection_diffusion_rain(s, dt, ierr)
-      case (method_instant)
+      case (method_instant_legacy)
+         legacy = .true.
          call prepare_legacy(s, ierr)
          if (ierr == 0) call do_instant_rain(s, ierr)
-      case (method_bottom_up)
+      case (method_bottom_up_legacy)
+         legacy = .true.
          call prepare_legacy(s, ierr)
          if (ierr == 0) call do_bottom_up_rain(s, ierr)
       case default
@@ -146,9 +158,27 @@ contains
          write(*,'(a)') ' element_sedimentation: unknown element_sedimentation_method ''' // &
             trim(s% element_sedimentation_method) // ''''
          write(*,'(a)') '    valid options are ''' // method_advection_diffusion // ''' (default), ''' // &
-            method_instant // ''' and ''' // method_bottom_up // ''' (legacy)'
+            method_instant // ''', ''' // method_bottom_up // ''', ''' // &
+            method_instant_legacy // ''' and ''' // method_bottom_up_legacy // ''''
       end select
       if (ierr /= 0) return
+
+      ! the legacy methods report in their own way; add the common summary line so that
+      ! every method can be followed (and counted) the same way
+      if (legacy .and. s% element_sedimentation_report) then
+         max_dx = maxval(abs(s% xa(i_sed,1:s% nz) - xa_entry(i_sed,1:s% nz)))
+         mass_moved = 0d0
+         do k = 1, s% nz
+            mass_moved = mass_moved + s% dm(k)*max(s% xa(i_sed,k) - xa_entry(i_sed,k), 0d0)
+         end do
+         if (max_dx > 0d0) then
+            write(*,'(a,i0,a,1pd10.3,a,1pd10.3)') ' element_sedimentation: model ', s% model_number, &
+               ' legacy ' // trim(s% element_sedimentation_method) // ' max_dX ', max_dx, ' mass_moved[g] ', mass_moved
+         else
+            write(*,'(a,i0,a)') ' element_sedimentation: model ', s% model_number, &
+               ': legacy ' // trim(s% element_sedimentation_method) // ' moved nothing, nothing to do'
+         end if
+      end if
 
       ! energy carried by the moved species, from the composition change of the step
       ! (any method)
@@ -162,6 +192,16 @@ contains
       end if
 
       s% need_to_setvars = .true.
+
+      if (s% element_sedimentation_report) then
+         max_dx = maxval(abs(s% xa(i_sed,1:s% nz) - xa_entry(i_sed,1:s% nz)))
+         if (max_dx > 0d0) then
+            call system_clock(clock_end)
+            seconds = dble(clock_end - clock_start)/dble(max(clock_rate, 1_8))
+            write(*,'(a,i0,a,f8.3,a)') ' element_sedimentation: model ', s% model_number, &
+               ' wall time of the module ', seconds, ' s'
+         end if
+      end if
 
    end subroutine do_element_sedimentation
 
@@ -308,8 +348,9 @@ contains
       ierr = 0
       if (.not. legacy_notice_printed) then
          write(*,'(a)') ' element_sedimentation: NOTE: element_sedimentation_method = ''' // &
-            trim(s% element_sedimentation_method) // ''' is a legacy method kept for reference;'
-         write(*,'(a)') '    ''' // method_advection_diffusion // ''' is the recommended method.'
+            trim(s% element_sedimentation_method) // ''' is the old implementation kept for comparison;'
+         write(*,'(a)') '    ''' // method_advection_diffusion // ''' is the recommended method, ''' // &
+            method_instant // ''' and ''' // method_bottom_up // ''' its instant limits.'
          legacy_notice_printed = .true.
       end if
       ! the legacy module keeps its own copy of the phase diagram: re-initialize it when the
@@ -334,20 +375,36 @@ contains
    ! ---------------------------------------------------------------------------
 
    subroutine do_advection_diffusion_rain(s, dt, ierr)
-      ! Transport of the sedimenting species by the advection_diffusion solver
-      ! (to steady state, or for the physical time dt), with the passive
-      ! counter-flow of all other species applied after every accepted step.
-      ! On any failure s% xa is restored to its state at entry and ierr /= 0.
+      ! Transport of the sedimenting species on MESA's grid with the floors (He-poor
+      ! limits) and caps (He-rich limits) of the phase diagram, for the three methods
+      ! that share this path:
+      !   'advection_diffusion_rain'  the advection_diffusion solver (to steady state,
+      !                               or for the physical time dt) with the passive
+      !                               counter-flow of all other species after every
+      !                               accepted step;
+      !   'instant_rain'              the same steady state in the limit of infinitely
+      !                               fast rain (adv_diff_instant_transfer), one
+      !                               transfer from the composition homogenized over
+      !                               the mixed regions, then the counter-flow;
+      !   'bottom_up_rain'            'instant_rain' repeated with the miscibility
+      !                               limits re-evaluated from the new composition
+      !                               after every transfer, until nothing moves
+      !                               (element_sedimentation_transfer_rounds).
+      ! Damping, overturn of unstable layers, checks, mixing takeover and report are
+      ! common. On any failure s% xa is restored to its state at entry and ierr /= 0.
       type (star_info), pointer :: s
       real(dp), intent(in) :: dt
       integer, intent(out) :: ierr
 
       integer :: nz, species, nvar, k, j, jj, donor, n_gap, n_sat, k_first, k_last, num_renormalized, &
-         n_merged_faces, n_mixed_blocks, k_overturn_outer, k_overturn_inner, n_contrast
-      logical :: rain_active
+         n_merged_faces, n_mixed_blocks, k_overturn_outer, k_overturn_inner, n_contrast, n_rounds, &
+         n_dummy1, n_dummy2, k_dummy1, k_dummy2
+      logical :: rain_active, instant_method, bottom_up_method
+      real(dp), allocatable :: w_face(:), flux_inst(:), flux_zero(:)
+      real(dp) :: change_other_inst
       real(dp) :: total_time, v0, rho_face, area, f, xsum, dev, max_sum_dev, mass_end, rel, &
-         max_species_dev, mass_moved, cons_err, max_passive_defect, change_limit, &
-         max_change, damping
+         max_species_dev, mass_moved, cons_err, max_passive_defect, change_limit, retry_limit, &
+         max_change, max_change_total, damping
       logical, allocatable :: has_gap(:), in_gap(:)
       real(dp), allocatable :: x_lo(:), x_hi(:), x(:), xa_start(:,:), xa_base(:,:), mass_start(:), &
          xp_old(:,:), xp_new(:,:)
@@ -360,6 +417,10 @@ contains
       nz = s% nz
       species = s% species
       nvar = species - 1
+      instant_method = (trim(s% element_sedimentation_method) == method_instant .or. &
+         trim(s% element_sedimentation_method) == method_bottom_up)
+      bottom_up_method = (trim(s% element_sedimentation_method) == method_bottom_up)
+      n_rounds = 0
 
       ! --- miscibility of every cell at its current (P, T, composition)
       allocate(has_gap(nz), in_gap(nz), x_lo(nz), x_hi(nz))
@@ -445,36 +506,23 @@ contains
       end if
       p% dm(1:nz) = s% dm(1:nz)
       p% cap_width = s% element_sedimentation_cap_width
+      allocate(w_face(nz+1))
+      w_face(1) = 0d0
+      w_face(nz+1) = 0d0
       do k = 2, nz
          rho_face = (s% dq(k-1)*s% rho(k) + s% dq(k)*s% rho(k-1))/(s% dq(k-1) + s% dq(k))
          area = pi4*s% r(k)*s% r(k)
          f = area*rho_face
          ! MESA's sig (mix_info: get_convection_sigmas) scaled by the user factor
          p% sig(k) = f*f*s% D_mix(k)*s% element_sedimentation_D_mix_factor/(0.5d0*(s% dm(k-1) + s% dm(k)))
-         ! carrier mass flow rate; cells without a gap never rain (their floor is
-         ! adv_diff_huge, so the flux would be zero anyway), hence such faces are
-         ! left inactive and do not enter the timescale bookkeeping of the solver.
-         ! In a mixing-only step (no saturated cell) nothing rains.
-         if (v0 > 0d0) then
-            donor = k - 1
-         else
-            donor = k
-         end if
-         if (rain_active .and. has_gap(donor)) p% w(k) = f*v0
+         w_face(k) = f*v0   ! carrier mass flow rate [g/s] if the face rains
       end do
-      do k = 1, nz
-         if (has_gap(k)) then
-            p% x_floor(k) = x_lo(k)   ! only the species above the He-poor limit rains out
-            p% x_cap(k) = x_hi(k)     ! inflow stops at the He-rich limit
-         else
-            p% x_floor(k) = adv_diff_huge
-            p% x_cap(k) = 1d0
-         end if
-      end do
+      call set_limits_and_flow()
 
       ! largest allowed change of the sedimenting species per cell in this step (damping,
-      ! applied after the solve; <= 0: no limit)
-      change_limit = change_limit_for_this_attempt(s)
+      ! applied after the solve; <= 0: no limit): the user limit, relative to the
+      ! mixing-only state, and on a MESA retry a limit on the whole change of the step
+      call change_limits_for_this_attempt(s, change_limit, retry_limit)
 
       opts% tol_steady = s% element_sedimentation_steady_state_tolerance
       opts% max_steps = s% element_sedimentation_max_steps
@@ -505,13 +553,24 @@ contains
       end if
       pp% dm(1:nz) = p% dm(1:nz)
       pp% sig(1:nz+1) = p% sig(1:nz+1)
+      ! the instant transfer hands after_step the whole change of the active species as
+      ! fluxes with dt = 1 (masses); the other species were already homogenized over the
+      ! mixed regions, so their passive step must carry the counter-flow only (a sig with
+      ! dt = 1 would add one second of diffusion, a unit-dependent term)
+      if (instant_method) pp% sig(1:nz+1) = 0d0
       max_passive_defect = 0d0
 
       ! --- reference state of the damping: the same transport without rain (mixing only).
       ! Only needed when a change limit applies. In mixed regions this is the homogenized
       ! composition, in unmixed (e.g. radiative) cells the composition at the start.
       xa_base(1:species,1:nz) = xa_start(1:species,1:nz)
-      if (change_limit > 0d0) then
+      if (instant_method) then
+         ! the instant methods start from the composition homogenized over the mixed
+         ! regions (every species, like the solver's diffusion in the steady state);
+         ! that state is also the reference of the damping
+         call overturn_unstable_layers(nz, species, s% dm, xa_base, mixed_face, &
+            n_dummy1, n_dummy2, k_dummy1, k_dummy2)
+      else if (change_limit > 0d0) then
          call alloc_adv_diff_problem(p_mix, nz, ierr)
          if (ierr /= 0) then
             write(*,'(a)') ' element_sedimentation: alloc_adv_diff_problem failed (mixing-only problem)'
@@ -533,10 +592,47 @@ contains
          x(1:nz) = xa_start(i_sed,1:nz)
       end if
 
-      call adv_diff_integrate(p, x, total_time, opts, stats, ierr, after_step)
-      max_change = maxval(abs(x(1:nz) - xa_base(i_sed,1:nz)))
+      if (instant_method) then
+         s% xa(1:species,1:nz) = xa_base(1:species,1:nz)
+         allocate(flux_inst(nz+1), flux_zero(nz+1))
+         flux_zero(1:nz+1) = 0d0
+         do
+            n_rounds = n_rounds + 1
+            x(1:nz) = s% xa(i_sed,1:nz)
+            call adv_diff_instant_transfer(p, x, flux_inst, s% element_sedimentation_max_steps, stats, ierr)
+            if (ierr /= 0) exit
+            ! the counter-flow of the other species for the whole transfer (dt = 1: the
+            ! fluxes are masses)
+            call after_step(1d0, x, flux_inst, flux_zero, change_other_inst, ierr)
+            if (ierr /= 0) then
+               ierr = adv_diff_err_callback
+               stats% message = 'passive counter-flow of the instant transfer failed'
+               exit
+            end if
+            if (.not. bottom_up_method) exit
+            if (n_rounds >= max(1, s% element_sedimentation_transfer_rounds)) exit
+            if (stats% max_change_total <= transfer_round_tol) exit
+            ! the composition changed: re-evaluate the limits and rain faces ("status
+            ! update") and transfer again
+            call evaluate_miscibility(pd, nz, species, s% xa, A, i_sed, i_partner, s% Peos, s% T, &
+               has_gap, in_gap, x_lo, x_hi, ierr)
+            if (ierr /= 0) then
+               write(*,'(a,i0,a)') ' element_sedimentation: evaluate_miscibility failed in transfer round ', &
+                  n_rounds + 1, ' (' // trim(miscibility_error_message(ierr)) // ')'
+               s% xa(1:species,1:nz) = xa_start(1:species,1:nz)
+               call cleanup()
+               return
+            end if
+            call set_limits_and_flow()
+         end do
+      else
+         call adv_diff_integrate(p, x, total_time, opts, stats, ierr, after_step)
+      end if
+      max_change = maxval(abs(x(1:nz) - xa_base(i_sed,1:nz)))          ! what the rain did
+      max_change_total = maxval(abs(x(1:nz) - xa_start(i_sed,1:nz)))   ! rain and mixing together
       last_attempt_model_number = s% model_number
-      last_attempt_max_change = max_change
+      last_attempt_max_change = max_change_total
+      last_attempt_dt = dt
       if (ierr /= 0) then
          call report_solver_failure(s, p, x, stats, ierr)
          s% xa(1:species,1:nz) = xa_start(1:species,1:nz)
@@ -556,13 +652,27 @@ contains
       ! become convective is homogenized as MESA's mixing would do, instead of keeping
       ! a fraction of its old (possibly inverted) composition jump. The rest of the rain
       ! happens in the following steps.
+      ! On a MESA retry of the same model the whole change of the step (mixing included) is
+      ! limited instead, relative to the composition at the start: MESA could not converge
+      ! with the previous attempt, and the mixing-only state can itself be a large change
+      ! (e.g. when the mixing coefficients of the start of the step would homogenize a
+      ! helium ocean that the previous attempt had just formed), so a limit relative to it
+      ! would not reduce what MESA sees.
       damping = 1d0
       if (change_limit > 0d0 .and. max_change > change_limit) then
          damping = change_limit/max_change
          s% xa(1:species,1:nz) = xa_base(1:species,1:nz) + &
             damping*(s% xa(1:species,1:nz) - xa_base(1:species,1:nz))
-         last_attempt_max_change = change_limit
       end if
+      if (retry_limit > 0d0) then
+         max_change_total = maxval(abs(s% xa(i_sed,1:nz) - xa_start(i_sed,1:nz)))
+         if (max_change_total > retry_limit) then
+            damping = damping*retry_limit/max_change_total
+            s% xa(1:species,1:nz) = xa_start(1:species,1:nz) + &
+               (retry_limit/max_change_total)*(s% xa(1:species,1:nz) - xa_start(1:species,1:nz))
+         end if
+      end if
+      last_attempt_max_change = maxval(abs(s% xa(i_sed,1:nz) - xa_start(i_sed,1:nz)))
 
       ! --- overturn of layers the transport left convectively unstable. The rain is
       ! deposited below the immiscible region with the mixing of the start of the step;
@@ -688,10 +798,10 @@ contains
          else
             cons_err = 0d0
          end if
-         write(*,'(a,i0,a,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,a,a,1pd10.3,a,1pd10.3,a,1pd9.2,a,1pd9.2,a,1pd9.2,a,1pd9.2,a,i0)') &
+         write(*,'(a,i0,a,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,a,a,1pd10.3,a,1pd10.3,a,1pd9.2,a,1pd9.2,a,1pd9.2,a,1pd9.2,a,i0)') &
             ' element_sedimentation: model ', s% model_number, trim(merge(' rain', ' mix ', rain_active)), &
             ' n_gap ', n_gap, ' n_sat ', n_sat, ' (k ', k_first, '-', k_last, ') n_contrast ', n_contrast, &
-            ' steps ', stats% steps, &
+            ' rounds ', n_rounds, ' steps ', stats% steps, &
             ' rejected ', stats% rejected_steps, &
             ' newton ', stats% newton_iters, ' stop ', trim(stop_reason_name(stats% stop_reason)), &
             ' max_dX ', maxval(abs(s% xa(i_sed,1:nz) - xa_start(i_sed,1:nz))), ' mass_moved[g] ', mass_moved, &
@@ -845,6 +955,53 @@ contains
       end function ledoux_unstable_face
 
 
+      subroutine set_limits_and_flow()
+         ! floors and caps from the miscibility limits, carrier flow on the faces whose
+         ! donor cell has a gap (cells without a gap never rain: their floor is
+         ! adv_diff_huge, so the flux would be zero anyway, and such faces are left
+         ! inactive and do not enter the timescale bookkeeping of the solver). In a
+         ! mixing-only step (no saturated cell) nothing rains.
+         ! The instant methods have no velocity: a face rains if the cell above it has a
+         ! gap (the species always sinks), and p% w only marks those faces. In a
+         ! mixing-only step no limits are installed at all (the instant transfer would
+         ! otherwise clamp gap cells to their floors without any rain face).
+         integer :: kk, dn
+         p% w(1:nz+1) = 0d0
+         do kk = 2, nz
+            if (v0 > 0d0 .or. instant_method) then
+               dn = kk - 1
+            else
+               dn = kk
+            end if
+            if (rain_active .and. has_gap(dn)) then
+               if (instant_method) then
+                  p% w(kk) = 1d0
+               else
+                  p% w(kk) = w_face(kk)
+               end if
+            end if
+         end do
+         do kk = 1, nz
+            if (has_gap(kk) .and. rain_active) then
+               p% x_floor(kk) = x_lo(kk)   ! only the species above the He-poor limit rains out
+               p% x_cap(kk) = x_hi(kk)     ! inflow stops at the He-rich limit
+            else
+               p% x_floor(kk) = adv_diff_huge
+               p% x_cap(kk) = 1d0
+            end if
+         end do
+      end subroutine set_limits_and_flow
+
+
+      logical function mixed_face(kk, xa_above, xa_below)
+         ! for overturn_unstable_layers: a face with mixing joins its two cells
+         integer, intent(in) :: kk
+         real(dp), intent(in) :: xa_above(:), xa_below(:)
+         mixed_face = (p% sig(kk) > 0d0)
+         if (.false.) mixed_face = mixed_face .or. (size(xa_above) + size(xa_below) < 0)
+      end function mixed_face
+
+
       subroutine cleanup()
          call free_adv_diff_problem(p)
          call free_adv_diff_problem(pp)
@@ -854,20 +1011,27 @@ contains
    end subroutine do_advection_diffusion_rain
 
 
-   real(dp) function change_limit_for_this_attempt(s) result(limit)
-      ! Largest allowed change of the mass fraction of the sedimenting species in a cell
-      ! for this attempt (applied by damping the step): the user limit
-      ! element_sedimentation_maximum_dXi_per_cell, and, when MESA is retrying the same
-      ! model after an attempt that transported material, element_sedimentation_retry_change_factor
-      ! times the largest change applied in that attempt (a steady-state solve does not
-      ! depend on the time step, so without this every retry would reproduce the
-      ! composition change that made the step fail). Returns a value <= 0 when there is
-      ! no limit.
+   subroutine change_limits_for_this_attempt(s, user_limit, retry_limit)
+      ! Largest allowed changes of the mass fraction of the sedimenting species in a cell
+      ! for this attempt (applied by damping the step), <= 0 when there is no limit:
+      ! user_limit = element_sedimentation_maximum_dXi_per_cell (relative to the mixing-only
+      ! state of the step), and, when MESA is retrying the same model after an attempt
+      ! that transported material, retry_limit = element_sedimentation_retry_change_factor
+      ! times the largest change (relative to the start of the step) applied in that
+      ! attempt, times the ratio of the new to the previous time step. A steady-state
+      ! solve does not depend on the time step, so without the retry limit every retry
+      ! would reproduce the composition change that made the step fail; and since the
+      ! heating of the step is the change divided by dt, a limit that only halves the
+      ! change while MESA halves dt would leave the heating rate unchanged, retry after
+      ! retry. Scaling with dt makes the change, and so the heating rate, shrink with
+      ! the time step.
       type (star_info), pointer :: s
-      real(dp) :: retry_limit
+      real(dp), intent(out) :: user_limit, retry_limit
       logical :: is_retry
+      real(dp) :: dt_ratio
 
-      limit = s% element_sedimentation_maximum_dXi_per_cell
+      user_limit = s% element_sedimentation_maximum_dXi_per_cell
+      retry_limit = -1d0
 
       is_retry = s% model_number_for_last_retry == s% model_number .and. &
          last_attempt_model_number == s% model_number .and. &
@@ -875,16 +1039,15 @@ contains
          s% element_sedimentation_retry_change_factor > 0d0
       if (.not. is_retry) return
 
-      retry_limit = s% element_sedimentation_retry_change_factor*last_attempt_max_change
-      if (limit <= 0d0 .or. retry_limit < limit) then
-         limit = retry_limit
-         write(*,'(a,i0,a,1pd10.3,a,1pd10.3,a)') &
-            ' element_sedimentation: model ', s% model_number, &
-            ' is a retry; the change per cell is limited to ', limit, &
-            ' (previous attempt: ', last_attempt_max_change, &
-            '; see element_sedimentation_retry_change_factor)'
-      end if
-   end function change_limit_for_this_attempt
+      dt_ratio = 1d0
+      if (last_attempt_dt > 0d0 .and. s% dt > 0d0) dt_ratio = min(1d0, s% dt/last_attempt_dt)
+      retry_limit = s% element_sedimentation_retry_change_factor*dt_ratio*last_attempt_max_change
+      write(*,'(a,i0,a,1pd10.3,a,1pd10.3,a,1pd10.3,a)') &
+         ' element_sedimentation: model ', s% model_number, &
+         ' is a retry; the change per cell of the whole step is limited to ', retry_limit, &
+         ' (previous attempt: ', last_attempt_max_change, ', dt ratio ', dt_ratio, &
+         '; see element_sedimentation_retry_change_factor)'
+   end subroutine change_limits_for_this_attempt
 
 
    subroutine report_solver_failure(s, p, x, stats, ierr)

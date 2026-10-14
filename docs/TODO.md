@@ -45,22 +45,24 @@
       interface should stay stratified (thermohaline instead of full convective remixing
       of a stabilizing helium gradient). The remixing hands the whole deposit back to the
       envelope, so by 5 Gyr the planet has rained out only ~0.7 % of its helium net.
-- [ ] Long run (20 Gyr requested, `dedt`, committed defaults, 2026-10-13): the planet rains
-      from 4.75 Gyr on, Y_env 0.2765 -> 0.143 at 11.6 Gyr, where the CMS EOS failure of the
-      first item ends the run (`store_eos_for_cell` for the He-poor envelope cells). The
-      released gravitational energy (W - W_base = -1.1e41 erg) is stored below a single
-      radiative boundary-layer cell at 0.84 M_J (gradT = gradr ~ 2.3, L through it 0.65 of
-      the surface value): the interior at 0.4-0.84 M_J is ~1000 K warmer than the no-rain
-      planet, the inner 0.4 M_J becomes thermally stable and its centre ~230 K cooler, the
-      envelope ~150-290 K cooler. L/L_base falls to 0.86 at 7 Gyr (T_eff -3.3 K) and climbs
-      back to 1.00-1.01 at 11.5 Gyr: the time-integrated luminosity deficit, 2e40 erg, equals
-      the stored (U + W) - base and stops growing there, i.e. the excess luminosity of the
-      Stevenson & Salpeter / Fortney & Hubbard picture only begins ~7 Gyr after onset in this
-      model, because the barrier is a radiative layer with no thermohaline/ODDC transport.
-      Needed to continue: the EOS blend for He-poor cells (first item) and the barrier
-      transport (item above). The `eps_grav` form is not usable for this experiment: its
-      cumulative energy error (2.4e-3 of the total energy, ~2e40 erg) is as large as the
-      stored energy, and its centre ends 1300 K warmer instead of 230 K cooler.
+- [ ] Long run (20 Gyr requested, `dedt`, 2026-10-14, without velocity time centering, see
+      `docs/index.md` Physics): the planet rains from 4.65 Gyr on, Y_env 0.2765 -> 0.145 at
+      9.7 Gyr, where the CMS EOS failure of the first item ends the run
+      (`store_eos_for_cell` for the He-poor envelope cells). The released gravitational
+      energy (W - W_base = -7.8e40 erg) is stored below the Ledoux-stable helium gradient:
+      the interior is up to ~1300 K warmer at the centre than the no-rain planet (an earlier
+      run with velocity time centering showed the centre 230 K cooler, an artefact of the
+      half-charged work term), the envelope cooler. L/L_base falls to 0.68 at 7 Gyr
+      (T_eff -6.4 K at 6 Gyr) and climbs back to 0.88 at 9.7 Gyr: the time-integrated
+      luminosity deficit, 4.5e40 erg, equals the stored (U + W) - base, i.e. the excess
+      luminosity of the Stevenson & Salpeter / Fortney & Hubbard picture has not started yet
+      5 Gyr after onset in this model, because the barrier is a radiative layer with no
+      thermohaline/ODDC transport. In the Saturn example, where the gap reaches the centre
+      and a helium ocean forms, the planet is 36 % more luminous and 4.4 K warmer than
+      without rain at 5 Gyr. Needed to continue the Jupiter run: the EOS blend for He-poor
+      cells (first item) and the barrier transport (item above). The `eps_grav` form is not
+      usable for this experiment: its cumulative energy error (2.4e-3 of the total energy,
+      ~2e40 erg) is as large as the stored energy.
 - [ ] The radiative atmosphere above the convective envelope keeps its initial helium
       while the envelope below drains (a heavier layer on top of a lighter one, with a
       stable thermal stratification: thermohaline regime, so the overturn leaves it to
@@ -71,6 +73,21 @@
       (2.366e-3 vs 2.365e-3), but comparisons must be made within one energy form.
 
 ## Numerics
+- [ ] `'instant_rain'` deviates from the infinite-velocity limit of the solver in three
+      documented ways (docs/index.md, section 8): cells at their cap are fixed and separate
+      mixed regions (the solver's diffusion crosses them), a cell above its cap never rains,
+      and the limit is taken from the homogenized state. A region-wise water filling with
+      soft caps (caps throttle advective inflow only) would remove the first; whether a
+      cell above the He-rich limit should rain at all is a physics question for the solver
+      too (its advective term ignores the donor's cap).
+- [ ] The composition change of a steady-state step does not depend on `dt`, so the
+      heating `eps_element_sedimentation` grows as 1/dt when MESA shortens the step (the
+      Saturn ocean formation triggers this). The retry damping now scales with the
+      time-step ratio, and a per-cell change limit (`element_sedimentation_maximum_dXi_per_cell`,
+      0.02 in the Saturn example) spreads the ocean formation over many steps; a transport
+      integrated over the physical `dt` (the solver's time-accurate mode) would bound the
+      rate physically, but only for steps shorter than the rain time scale (~1 yr at
+      1 m/s), far below MESA's steps.
 - [ ] The steady-state residual is normalized with the longest face timescale; purely
       diffusive modes relax on ~nz^2 face timescales, so the slowest mode may be ~1e-4 from
       its limit at the default tolerance (tighten `element_sedimentation_steady_state_tolerance`

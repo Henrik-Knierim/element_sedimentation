@@ -26,6 +26,7 @@ module run_star_extras
    use star_def
    use const_def
    use math_lib
+   use chem_def, only: ihe4
 
    implicit none
 
@@ -74,7 +75,7 @@ contains
 
 
    integer function extras_start_step(id)
-      use chem_def, only: chem_isos
+      use chem_def, only: chem_isos, ihe4
       integer, intent(in) :: id
       integer :: ierr
       type (star_info), pointer :: s
@@ -109,7 +110,7 @@ contains
       ierr = 0
       call star_ptr(id, s, ierr)
       if (ierr /= 0) return
-      how_many_extra_history_columns = 1
+      how_many_extra_history_columns = 2
    end function how_many_extra_history_columns
 
 
@@ -119,6 +120,7 @@ contains
       real(dp) :: vals(n)
       integer, intent(out) :: ierr
       type (star_info), pointer :: s
+      integer :: k
 
       ! error handling
       ierr = 0
@@ -127,6 +129,17 @@ contains
 
       names(1) = 'radius_Jup'
       vals(1) = exp10(s% log_surface_radius) / r_jupiter_avg * Rsun
+
+      ! helium mass fraction of the convective envelope: first mixed cell below the
+      ! radiative atmosphere (the outermost cells are never mixed)
+      names(2) = 'Y_env'
+      vals(2) = s% xa(s% net_iso(ihe4), 1)
+      do k = 1, s% nz
+         if (s% mixing_type(k) /= no_mixing) then
+            vals(2) = s% xa(s% net_iso(ihe4), k)
+            exit
+         end if
+      end do
 
    end subroutine data_for_extra_history_columns
 
@@ -138,7 +151,7 @@ contains
       ierr = 0
       call star_ptr(id, s, ierr)
       if (ierr /= 0) return
-      how_many_extra_profile_columns = 2
+      how_many_extra_profile_columns = 3
    end function how_many_extra_profile_columns
 
 
@@ -163,6 +176,10 @@ contains
 
       names(i_radius_Jup) = 'radius_Jup'
       vals(1:s%nz,i_radius_Jup) = s% r(1:s%nz) / r_jupiter_avg
+
+      ! heating rate of the element_sedimentation extension [erg/g/s]
+      names(i_radius_Jup + 1) = 'eps_sed'
+      vals(1:s%nz,i_radius_Jup + 1) = s% eps_element_sedimentation(1:s%nz)
 
 
    end subroutine data_for_extra_profile_columns

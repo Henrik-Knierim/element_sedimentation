@@ -30,16 +30,45 @@
       ! element_sedimentation_method
       ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-      ! Algorithm for the mass transfer:
+      ! Algorithm for the mass transfer. The first three share the same floors (He-poor
+      ! limits), caps (He-rich limits), counter-flow of the other species, damping,
+      ! overturn, energy terms, checks and mixing takeover; they differ in how the
+      ! transport is solved:
 
-      ! + ``'advection_diffusion_rain'`` : implicit advection-diffusion solver with the
-      !   miscibility limits as floor and cap (recommended).
-      ! + ``'instant_rain'`` : legacy; transfers all the rain mass at once.
-      ! + ``'bottom_up_rain'`` : legacy; transfers the rain cell by cell from the bottom up.
+      ! + ``'advection_diffusion_rain'`` : implicit advection-diffusion solver with a finite
+      !   rain velocity, to the steady state of the step or for the physical time
+      !   (recommended; the only one with a time scale).
+      ! + ``'instant_rain'`` : the same steady state in the limit of infinitely fast rain,
+      !   computed directly in one sweep (every immiscible cell drains to its He-poor
+      !   limit, the drained helium fills the cells below up to their limits, fully
+      !   miscible cells take the rest, and a layer at the He-rich limit grows upward
+      !   from the centre when the helium cannot go deeper); no iteration, no velocity.
+      !   The fast backup.
+      ! + ``'bottom_up_rain'`` : ``'instant_rain'`` repeated with the miscibility limits
+      !   re-evaluated from the new composition after every transfer, until a transfer
+      !   moves nothing (at most ``element_sedimentation_transfer_rounds`` rounds). The
+      !   limits depend on the composition only through the other species, so this
+      !   differs from ``'instant_rain'`` only where their ratios vary.
+      ! + ``'instant_rain_legacy'``, ``'bottom_up_rain_legacy'`` : the old implementations
+      !   of the two, kept for comparison (``element_sedimentation_legacy.f90``): one
+      !   global transfer with heuristics for the deposit region, or the same repeated
+      !   for every cell range k:nz from the centre outward. They use neither the caps,
+      !   nor the overturn, nor the mixing takeover.
 
       ! ::
 
     element_sedimentation_method = 'advection_diffusion_rain'
+
+      ! element_sedimentation_transfer_rounds
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Maximum number of transfer rounds of ``'bottom_up_rain'`` (each round re-evaluates
+      ! the miscibility limits from the composition the previous round left). Rounds stop
+      ! early when a transfer moves less than 1d-12 in mass fraction.
+
+      ! ::
+
+    element_sedimentation_transfer_rounds = 5
 
       ! element_sedimentation_chemical_species
       ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -109,7 +138,9 @@
       ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
       ! Sedimentation velocity of the droplets (cm/s). Positive values sink toward the
-      ! centre. The carrier mass flow rate through a face is ``4 pi r^2 rho v``.
+      ! centre. The carrier mass flow rate through a face is ``4 pi r^2 rho v``. Only
+      ! ``'advection_diffusion_rain'`` uses it; the instant methods always let the species
+      ! sink and ignore the value.
 
       ! ::
 
@@ -207,12 +238,22 @@
       ! sedimenting species was transported, the steady-state result would be identical
       ! on every retry because it does not depend on the time step; the structure solver
       ! then fails again until the minimum time step is reached. If this factor is > 0,
-      ! every retry of a model limits the largest change per cell to this factor times the
-      ! largest change applied in the previous attempt, in the same way as
-      ! ``element_sedimentation_maximum_dXi_per_cell`` (compounding with each further
-      ! retry, and never above that limit when it is set). The material that did not rain
-      ! out in this step rains out in the following steps. A notice is printed whenever
-      ! the limit is applied. Values <= 0 disable this.
+      ! every retry of a model limits the largest change per cell of the whole step
+      ! (rain and mixing together, relative to the composition at the start of the step)
+      ! to this factor times the largest change applied in the previous attempt times
+      ! the ratio of the new to the previous time step, compounding with each further
+      ! retry; the composition is blended between the start and the result of the
+      ! transport. The time-step ratio matters: the heating of the step is the energy
+      ! of the composition change divided by ``dt``, so a limit that only halved the
+      ! change while MESA halves ``dt`` would leave the heating rate unchanged, retry
+      ! after retry. Unlike
+      ! ``element_sedimentation_maximum_dXi_per_cell`` this is measured from the start of
+      ! the step and not from the mixing-only state, because MESA could not converge with
+      ! the previous attempt and the mixing-only state can itself be a large change (the
+      ! mixing coefficients of the start of the step may homogenize a helium ocean the
+      ! previous attempt had just formed). The material that did not rain out in this
+      ! step rains out in the following steps. A notice is printed whenever the limit is
+      ! applied. Values <= 0 disable this.
 
       ! ::
 
@@ -237,12 +278,12 @@
       ! If true, MESA's mixing coefficients (``D_mix`` and ``sig``) are set to zero on
       ! both faces of every cell that was inside the immiscibility gap before the
       ! transport, for the rest of the step. Also sets ``do_conv_premix = .false.``.
-      ! Only used by ``'advection_diffusion_rain'`` and only if
-      ! ``element_sedimentation_replace_mesa_mixing = .false.`` (which switches off all of
-      ! MESA's composition mixing in the steps in which the module acts). The legacy methods
-      ! ignore it:
-      ! ``'instant_rain'`` always sets ``D_mix = 0`` in the immiscible cells and switches
-      ! off ``do_conv_premix``; ``'bottom_up_rain'`` never changes the mixing.
+      ! Used by ``'advection_diffusion_rain'``, ``'instant_rain'`` and ``'bottom_up_rain'``,
+      ! and only if ``element_sedimentation_replace_mesa_mixing = .false.`` (which switches
+      ! off all of MESA's composition mixing in the steps in which the module acts). The
+      ! legacy methods ignore it: ``'instant_rain_legacy'`` always sets ``D_mix = 0`` in the
+      ! immiscible cells and switches off ``do_conv_premix``; ``'bottom_up_rain_legacy'``
+      ! never changes the mixing.
 
       ! ::
 
@@ -288,7 +329,8 @@
       ! until the face above them is stable, e.g. down to the centre of an interior of
       ! uniform composition. ``gradr`` and ``grada`` are those of the start of the step.
       ! Faces that are only thermohaline-unstable (``gradr < grada + B``, ``B < 0``) are left
-      ! to MESA. Only used by ``'advection_diffusion_rain'``. The report line shows the
+      ! to MESA. Used by ``'advection_diffusion_rain'``, ``'instant_rain'`` and
+      ! ``'bottom_up_rain'`` (the legacy methods ignore it). The report line shows the
       ! number of faces and blocks mixed.
 
       ! ::
@@ -312,7 +354,8 @@
       ! the cells that receive hydrogen (the core, by ~100 K per 0.3 % of helium) and
       ! heats the ones that receive helium. With this control every composition change
       ! of the species in a mixed region goes through the module and its energy terms.
-      ! Only used by ``'advection_diffusion_rain'``. Note that in steady-state mode the
+      ! Used by ``'advection_diffusion_rain'``, ``'instant_rain'`` and ``'bottom_up_rain'``
+      ! (the legacy methods ignore it). Note that in steady-state mode the
       ! module homogenizes every region connected by ``D_mix > 0`` at once; set it to
       ! false in models where slow mixing processes (thermohaline, rotational) of the
       ! species matter, or use ``element_sedimentation_solve_to_steady_state = .false.``.

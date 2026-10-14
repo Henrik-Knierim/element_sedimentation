@@ -18,6 +18,7 @@ program tester
 
    use test_support, only: print_test_summary
    use test_advection_diffusion, only: run_advection_diffusion_tests
+   use test_instant_transfer, only: run_instant_transfer_tests
    use test_phase_diagram, only: run_phase_diagram_tests
    use test_miscibility, only: run_miscibility_tests
    use test_sedimentation_energy, only: run_sedimentation_energy_tests
@@ -29,6 +30,7 @@ program tester
 
    nfail = 0
    call run_advection_diffusion_tests(nfail)
+   call run_instant_transfer_tests(nfail)
    call run_phase_diagram_tests(nfail)
    call run_miscibility_tests(nfail)
    call run_sedimentation_energy_tests(nfail)

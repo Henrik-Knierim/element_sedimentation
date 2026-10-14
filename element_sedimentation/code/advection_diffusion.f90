@@ -46,6 +46,7 @@ module advection_diffusion
    public :: alloc_adv_diff_problem, free_adv_diff_problem, check_adv_diff_problem
    public :: adv_diff_fluxes, adv_diff_timescales
    public :: adv_diff_implicit_step, adv_diff_passive_step, adv_diff_integrate
+   public :: adv_diff_instant_transfer
    public :: adv_diff_error_message, adv_diff_after_step_interface
 
    integer, parameter, public :: adv_diff_ok = 0
@@ -57,6 +58,7 @@ module advection_diffusion
    integer, parameter, public :: adv_diff_err_bounds = 6          ! x < -1d-12 or (if enabled) x > x_upper_bound + 1d-12
    integer, parameter, public :: adv_diff_err_dt_too_small = 7    ! dt shrank below dt_min_factor * tau_min
    integer, parameter, public :: adv_diff_err_callback = 8        ! after_step callback returned ierr /= 0
+   integer, parameter, public :: adv_diff_err_no_room = 9         ! instant transfer: the advected mass has nowhere to go (every cell at its cap)
 
    integer, parameter, public :: adv_diff_stop_steady_state = 1
    integer, parameter, public :: adv_diff_stop_total_time = 2
@@ -1221,9 +1223,295 @@ contains
          msg = 'time step shrank below dt_min_factor*tau_min'
       case (adv_diff_err_callback)
          msg = 'after_step callback failed'
+      case (adv_diff_err_no_room)
+         msg = 'instant transfer: advected mass has nowhere to go'
       case default
          msg = 'unknown advection_diffusion error code'
       end select
    end function adv_diff_error_message
+
+
+   ! ---------------------------------------------------------------------------
+   ! instant transfer: the steady state for infinitely fast advection
+   ! ---------------------------------------------------------------------------
+
+   subroutine adv_diff_instant_transfer(p, x, flux_adv, max_passes, stats, ierr)
+      ! Steady state of the problem p in the limit w -> infinity at every active face
+      ! (w > 0 required: advection toward larger k), with finite diffusion.
+      !
+      ! In that limit nothing can stay above its floor in a cell that advects
+      ! (w(k+1) > 0): the excess moves down at once and passes through the cells below
+      ! until something holds it, a cell below its own floor (up to that floor), a cell
+      ! that does not advect (a sink, including the innermost cell; up to its cap), or,
+      ! when the way down is blocked by a cell at its cap, the cells above the blockage,
+      ! which fill up to their caps one after the other ("back-fill"; this is how a layer
+      ! at the cap grows upward). Diffusion equalizes the cells connected by sig > 0 as
+      ! far as the floors allow: within such a region the steady state is
+      !    x_k = min(lambda, m_k),   m_k = min(x_floor_j, x_cap_j) over j = k..b
+      ! (the running minimum of the limits below, since helium above a limit rains out of
+      ! that cell and anything above the limit of a cell further down would be drained
+      ! there), with lambda set by the mass in the region. A region whose bottom cell
+      ! advects into a cell that is not full passes its overflow on; otherwise the bottom
+      ! cell fills to its cap and the overflow back-fills. Cells at or above their cap are
+      ! fixed and separate regions.
+      !
+      ! Regions are processed from the surface inward; the sweep is repeated until nothing
+      ! changes (back-filling can alter regions already processed), at most max_passes
+      ! (then adv_diff_err_no_steady_state). scale and cap_width of p are not used.
+      ! flux_adv(k) is the mass of x that crossed face k toward larger k (flux_adv(1) =
+      ! flux_adv(nz+1) = 0); it follows from the change of every cell, so the species is
+      ! conserved to round-off. stats%steps is the number of sweeps.
+      type(adv_diff_problem), intent(in) :: p
+      real(dp), intent(inout) :: x(:)       ! (nz)
+      real(dp), intent(out) :: flux_adv(:)  ! (nz+1)
+      integer, intent(in) :: max_passes
+      type(adv_diff_stats), intent(out) :: stats
+      integer, intent(out) :: ierr
+
+      integer :: nz, k, a, b, pass
+      real(dp) :: change, mass_start, tol_change, overflow
+      real(dp), allocatable :: x_start(:), x_prev(:), m(:)
+      logical, allocatable :: has_out(:)
+      character(len=256) :: message
+
+      ierr = adv_diff_ok
+      stats = adv_diff_stats()
+      if (.not. problem_is_allocated(p)) &
+         call mesa_error(__FILE__, __LINE__, 'adv_diff_instant_transfer: problem not allocated')
+      call check_adv_diff_problem(p, ierr, message)
+      if (ierr /= 0) then
+         stats% message = message
+         return
+      end if
+      nz = p% nz
+      if (size(x) < nz .or. size(flux_adv) < nz+1) then
+         ierr = adv_diff_err_bad_input
+         stats% message = 'x or flux_adv too small'
+         return
+      end if
+      if (max_passes < 1) then
+         ierr = adv_diff_err_bad_input
+         stats% message = 'max_passes must be >= 1'
+         return
+      end if
+      do k = 1, nz
+         if (is_bad(x(k)) .or. x(k) < 0d0) then
+            ierr = adv_diff_err_bad_input
+            stats% k_fail = k
+            stats% message = 'x is NaN, Inf or negative'
+            return
+         end if
+      end do
+      do k = 2, nz
+         if (p% w(k) < 0d0) then
+            ierr = adv_diff_err_bad_input
+            stats% k_fail = k
+            stats% message = 'instant transfer requires w >= 0 (advection toward larger k)'
+            return
+         end if
+      end do
+
+      allocate(x_start(nz), x_prev(nz), m(nz), has_out(nz))
+      x_start(1:nz) = x(1:nz)
+      mass_start = dot_product(p% dm(1:nz), x(1:nz))
+      tol_change = 1d-14*max(1d0, maxval(x(1:nz)))
+      do k = 1, nz
+         has_out(k) = .false.
+         if (k < nz) has_out(k) = (p% w(k+1) > 0d0)
+      end do
+
+      change = 0d0
+      do pass = 1, max_passes
+         stats% steps = pass
+         x_prev(1:nz) = x(1:nz)
+         k = 1
+         do while (k <= nz)
+            if (full(k)) then
+               k = k + 1
+               cycle
+            end if
+            ! region a..b: cells connected by diffusion, none of them full
+            a = k
+            b = k
+            do while (b < nz)
+               if (p% sig(b+1) <= 0d0) exit
+               if (full(b+1)) exit
+               b = b + 1
+            end do
+            call fill_region(a, b, overflow)
+            if (overflow > 0d0) then
+               if (can_pass(b)) then
+                  call push_down(b+1, overflow, ierr)
+               else
+                  call back_fill(b-1, overflow, ierr)
+               end if
+               if (ierr /= 0) return
+            end if
+            k = b + 1
+         end do
+         change = maxval(abs(x(1:nz) - x_prev(1:nz)))
+         stats% max_change_last = change
+         if (change <= tol_change) exit
+      end do
+      if (change > tol_change) then
+         ierr = adv_diff_err_no_steady_state
+         stats% stop_reason = 0
+         write(stats% message, '(a,i0,a,1pd10.3)') 'instant transfer did not settle within ', max_passes, &
+            ' passes; last change ', change
+         return
+      end if
+      stats% stop_reason = adv_diff_stop_steady_state
+
+      ! fluxes from the change of every cell; the species is conserved by construction
+      flux_adv(1) = 0d0
+      do k = 1, nz
+         flux_adv(k+1) = flux_adv(k) - p% dm(k)*(x(k) - x_start(k))
+      end do
+      stats% conservation_error = abs(flux_adv(nz+1))/max(mass_start, tiny(1d0))
+      if (stats% conservation_error > 1d-10) then
+         ierr = adv_diff_err_conservation
+         write(stats% message, '(a,1pd10.3)') 'instant transfer: relative conservation error ', stats% conservation_error
+         return
+      end if
+      flux_adv(nz+1) = 0d0
+      stats% max_change_total = maxval(abs(x(1:nz) - x_start(1:nz)))
+      do k = 1, nz
+         if (x(k) < -1d-12) then
+            ierr = adv_diff_err_bounds
+            stats% k_fail = k
+            stats% message = 'instant transfer: negative mass fraction'
+            return
+         end if
+         if (x(k) < 0d0) then
+            x(k) = 0d0
+            stats% num_clipped = stats% num_clipped + 1
+         end if
+      end do
+
+   contains
+
+      logical function full(kk)
+         ! at or above its cap: fixed, impassable
+         integer, intent(in) :: kk
+         full = (x(kk) >= p% x_cap(kk))
+      end function full
+
+      logical function can_pass(kk)
+         ! the overflow of a region ending in cell kk can leave through its inner face
+         integer, intent(in) :: kk
+         can_pass = .false.
+         if (has_out(kk)) can_pass = .not. full(kk+1)
+      end function can_pass
+
+      subroutine fill_region(a, b, overflow)
+         ! water-filling of the region a..b: x_k = min(lambda, m_k) with the running
+         ! minimum m of the limits below, lambda from the mass; overflow is what the
+         ! region cannot hold
+         integer, intent(in) :: a, b
+         real(dp), intent(out) :: overflow
+         integer :: kk, j
+         real(dp) :: mass, capacity, mass_clamped, dm_free, lam
+         mass = dot_product(p% dm(a:b), x(a:b))
+         ! a floor only acts through outgoing advection: cells without a rain face below
+         ! are limited by their cap alone
+         if (can_pass(b)) then
+            m(b) = min(p% x_floor(b), p% x_cap(b))
+         else
+            m(b) = p% x_cap(b)
+         end if
+         do kk = b-1, a, -1
+            if (has_out(kk)) then
+               m(kk) = min(p% x_floor(kk), p% x_cap(kk), m(kk+1))
+            else
+               m(kk) = min(p% x_cap(kk), m(kk+1))
+            end if
+         end do
+         capacity = dot_product(p% dm(a:b), m(a:b))
+         if (mass >= capacity) then
+            x(a:b) = m(a:b)
+            overflow = mass - capacity
+            return
+         end if
+         overflow = 0d0
+         mass_clamped = 0d0
+         dm_free = sum(p% dm(a:b))
+         do j = a, b
+            lam = (mass - mass_clamped)/dm_free
+            if (lam <= m(j)) then
+               x(j:b) = lam
+               return
+            end if
+            x(j) = m(j)
+            mass_clamped = mass_clamped + p% dm(j)*m(j)
+            dm_free = dm_free - p% dm(j)
+         end do
+         ! not reached: mass < capacity guarantees an exit above
+         x(b) = x(b) + (mass - mass_clamped)/p% dm(b)
+      end subroutine fill_region
+
+      subroutine push_down(k_start, R, ierr_push)
+         ! pass the mass R down from cell k_start until something holds it
+         integer, intent(in) :: k_start
+         real(dp), intent(inout) :: R
+         integer, intent(out) :: ierr_push
+         integer :: kk
+         real(dp) :: room, take
+         ierr_push = 0
+         do kk = k_start, nz
+            if (R <= 0d0) return
+            if (full(kk)) then
+               call back_fill(kk-1, R, ierr_push)
+               return
+            end if
+            if (has_out(kk)) then
+               ! a cell that advects holds what fits below its floor and passes the rest
+               if (x(kk) < p% x_floor(kk)) then
+                  room = p% dm(kk)*(min(p% x_floor(kk), p% x_cap(kk)) - x(kk))
+                  take = min(R, max(room, 0d0))
+                  x(kk) = x(kk) + take/p% dm(kk)
+                  R = R - take
+               end if
+            else
+               ! a sink holds everything up to its cap
+               room = max(p% dm(kk)*(p% x_cap(kk) - x(kk)), 0d0)
+               take = min(R, room)
+               if (take >= room) then
+                  x(kk) = p% x_cap(kk)   ! exactly full (no round-off below the cap)
+               else
+                  x(kk) = x(kk) + take/p% dm(kk)
+               end if
+               R = R - take
+               if (R > 0d0) call back_fill(kk-1, R, ierr_push)
+               return
+            end if
+         end do
+         if (R > 0d0) call back_fill(nz, R, ierr_push)
+      end subroutine push_down
+
+      subroutine back_fill(k_top, R, ierr_fill)
+         ! the mass R cannot go below cell k_top+1: fill the cells k_top, k_top-1, ... up to their caps
+         integer, intent(in) :: k_top
+         real(dp), intent(inout) :: R
+         integer, intent(out) :: ierr_fill
+         integer :: j
+         real(dp) :: room, take
+         ierr_fill = 0
+         do j = k_top, 1, -1
+            room = max(p% dm(j)*(p% x_cap(j) - x(j)), 0d0)
+            take = min(R, room)
+            if (take >= room) then
+               x(j) = p% x_cap(j)   ! exactly full (no round-off below the cap)
+            else
+               x(j) = x(j) + take/p% dm(j)
+            end if
+            R = R - take
+            if (R <= 0d0) return
+         end do
+         ierr_fill = adv_diff_err_no_room
+         stats% k_fail = max(k_top, 1)
+         write(stats% message, '(a,1pd10.3,a)') 'instant transfer: ', R, ' g of the species have nowhere to go'
+      end subroutine back_fill
+
+   end subroutine adv_diff_instant_transfer
 
 end module advection_diffusion
