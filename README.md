@@ -31,8 +31,10 @@ Then, in your work directory, run `./clean` and `./mk` and add to `&controls`:
 ```
 
 `planet_helium_rain/` is a complete example (Jupiter-like planet; see its `rn*` scripts).
-`python3 setup.py uninstall` restores MESA. `soft_install` rebuilds only `star_data` and
-`star` and is the quick way to recompile after editing the sources.
+`python3 setup.py uninstall` removes the extension from MESA again. `soft_install` rebuilds
+only `star_data` and `star` and is the quick way to recompile after editing the sources.
+The installer records what it inserted and removes exactly that, so the extension can be
+installed together with `gentle_mixing` (which uses the same script) in either order.
 
 Unit tests of the solver, phase diagram and composition modules (no installation needed):
 
@@ -91,7 +93,7 @@ element_sedimentation/
       star_data_step_work.inc, alloc.f90, hydro_energy.f90, evolve.f90, init.f90   patch snippets
    test/                    unit tests (./mk, ./rn, ./clean), data/Schoettler+2018.csv,
                             integration/compare_methods.py (runs an example with several methods)
-   backup/                  pristine MESA files (created by setup.py, not in git)
+   backup/                  MESA files as found before the first install, and records of the inserted blocks (created by setup.py, not in git)
 docs/index.md               physics, numerics, controls, installation, tests
 docs/CHANGELOG.md           what changed and why (2026-10 refactor)
 docs/TODO.md                open points

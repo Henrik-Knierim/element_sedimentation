@@ -98,6 +98,19 @@ methods with the Saturn example, removal of the old implementations.
   filling to the cap, and the instant methods ignoring the velocity; the remaining
   documented deviations from the solver are listed in `docs/index.md`, section 8.
 
+### Installer shared with gentle_mixing (2026-10-16)
+- `setup.py` now records the blocks it inserted into each MESA file
+  (`backup/<file>.applied.json`) and removes exactly those on uninstall, located by
+  content; the pristine backup is only a last resort (`--force`). Before, uninstall and
+  reinstall restored the backup, which would have wiped the patches of a second
+  extension in the same file. The configuration (extension name, marker, sources,
+  patched files) sits in one block at the top; the same script with another block
+  installs `gentle_mixing`, and the two extensions can be installed, updated and removed
+  independently in any order (seven MESA files are patched by both). Every snippet
+  block must contain the marker; a block may repeat its own anchor line. Files patched
+  by the previous version of the script are recognized (backup + snippets) and get their
+  record on the next `soft_install`.
+
 ### Installer, tests, documentation
 - `setup.py` rewritten: anchor-based patching of a pristine MESA with backups, `check`
   (anchors, snippets, control consistency), `status`, `install`, `soft_install`

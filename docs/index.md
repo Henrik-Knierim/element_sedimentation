@@ -348,36 +348,47 @@ python3 setup.py status
 
 | command | effect |
 |---|---|
-| `install` | patch MESA, copy the five sources, full MESA rebuild |
+| `install` | patch MESA, copy the sources, full MESA rebuild |
 | `soft_install` | same, but rebuild only `star_data` and `star` (`./clean; ./mk; ./export`) |
-| `uninstall` / `soft_uninstall` | restore the backups, remove the sources, rebuild `star_data` and `star` |
+| `uninstall` / `soft_uninstall` | remove the extension's blocks from the MESA files, remove the sources, rebuild `star_data` and `star` |
 | `reinstall` / `soft_reinstall` | uninstall + install / soft_install |
 | `single_install` / `single_uninstall` / `single_reinstall -f NAME` | one file and its module |
 | `status` | patched/pristine and up-to-date/STALE state of every file, MESA version, backup version |
 | `check` | parse all snippets, verify every anchor without modifying MESA, and check that every control is declared, initialized and read consistently |
-| `clean` | delete the backup directory (refused while MESA is patched) |
+| `clean` | delete the backup directory with the backups and records (refused while MESA is patched) |
 
-Options: `-y/--yes` (no prompts), `--no-build` (patch/restore only), `--force` (ignore
-the MESA version recorded with the backups), `-v`, `--mesa-dir DIR`.
+Options: `-y/--yes` (no prompts), `--no-build` (patch/unpatch only), `--force` (restore
+the backup of a file that has no record, ignore the MESA version recorded with the
+backups), `-v`, `--mesa-dir DIR`.
 
 Patch snippets consist of blocks `! anchor = '<text of a MESA line>'[; replace|; prepend|; all]`
 followed by the lines to insert after (default), instead of, before, or after every
-occurrence of the anchor line. Backups of the pristine MESA files are kept in
-`element_sedimentation/backup/` (created on install, never committed), each with a record
-of the MESA version it was taken from (`<file>.bak.version`; a `backup/MESA_VERSION` from an
-older version of the script is only read as a fallback). A MESA file counts as pristine when
-it does not contain the substring `element_sedimentation`; backups are retaken whenever the
-MESA file is pristine, so stale backups from an older MESA are harmless. Before anything is
-modified, `install`, `uninstall`, `reinstall` and the `single_*` commands check that every
-patched file has a pristine backup recorded for the current MESA version, and the install
-commands do a dry run of every anchor, so a failing command leaves MESA untouched.
-Backups without a version record (made by an older version of the script) are adopted by
-running `python3 setup.py soft_install --force` once. `install` re-patches from the
-pristine version, so it is idempotent. `status` reports every file as up to date or STALE
-relative to `code/` (or as unverifiable when its backup is missing), so it shows when MESA
-needs a `soft_install` after editing the sources. Restored and copied files get the current
-modification time, so builds without `./clean` recompile them, and the build scripts run
-with `MESA_DIR` set to the installation being patched (also with `--mesa-dir`).
+occurrence of the anchor line; every block contains the marker `element_sedimentation`.
+The script records what it inserted into each MESA file
+(`element_sedimentation/backup/<file>.applied.json`: anchor, mode, the inserted lines and,
+for `replace`, the replaced line) and `uninstall` removes exactly those blocks again,
+located by their content rather than by position, so the patches of another extension in
+the same file stay untouched. The same script, with another configuration block at its top,
+installs `gentle_mixing`; the two extensions patch seven MESA files in common (`evolve.f90`,
+`ctrls_io.f90`, `init.f90`, `star_controls.inc`, `star_data_step_work.inc`,
+`controls.defaults`, `makefile_base`, with different anchors) and can be installed, updated
+and removed independently and in any order. `install` first removes the previously recorded
+blocks and then inserts the current snippets, so it is idempotent and updates a stale
+installation in place. The MESA file as found before the first install is kept in
+`backup/<file>.bak` (never committed) with the MESA version it came from
+(`<file>.bak.version`; a `backup/MESA_VERSION` from an older version of the script is only
+read as a fallback). It is only used with `--force`, for a file that contains the marker but
+has no record and is not exactly backup + snippets; that restore also removes the other
+extension's patches of the file. Files patched by an older version of the script (no
+record) are recognized when they are exactly backup + snippets, and the record is written
+on the next `soft_install`. Before anything is modified, the install and uninstall commands
+check that every patched file can be unpatched and dry-run every anchor against the file
+without this extension's blocks, so a failing command leaves MESA untouched. `status`
+reports every file as pristine, up to date, STALE relative to `code/`, patched by an older
+script, or without a record, so it shows when MESA needs a `soft_install` after editing the
+sources. Patched and copied files get the current modification time, so builds without
+`./clean` recompile them, and the build scripts run with `MESA_DIR` set to the installation
+being patched (also with `--mesa-dir`).
 
 Modules other than `star` that use `star_info` (e.g. `binary`, `astero`) are only rebuilt
 by the full `install`; use that if you need them.
