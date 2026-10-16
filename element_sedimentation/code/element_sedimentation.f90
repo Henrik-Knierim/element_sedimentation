@@ -701,7 +701,8 @@ contains
                write(*,'(a)') ' element_sedimentation: WARNING: convective premixing and element sedimentation ' // &
                   'with suppressed mixing are both on.'
                write(*,'(a)') '    Regions that rain out would flip-flop between homogeneous and rained-out mixing,'
-               write(*,'(a)') '    so do_conv_premix is set to .false. for the rest of the run.'
+               write(*,'(a)') '    so do_conv_premix is set to .false. for the rest of the run (this also switches off'
+               write(*,'(a)') '    the convective premixing of the gentle_mixing extension, if installed).'
                conv_premix_notice_printed = .true.
             end if
             s% do_conv_premix = .false.

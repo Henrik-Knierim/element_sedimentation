@@ -393,6 +393,14 @@ being patched (also with `--mesa-dir`).
 Modules other than `star` that use `star_info` (e.g. `binary`, `astero`) are only rebuilt
 by the full `install`; use that if you need them.
 
+With `gentle_mixing` installed as well, both extensions can be switched on in one run. Its
+convective premixing runs before the sedimentation transport in every step, the rain is not
+counted by its mean-square-displacement limiter (MESA resets `xa_start` after this hook),
+its damping of `mix_factor` does not reach the transport (which uses `D_mix`), and
+`element_sedimentation_suppress_mixing_in_immiscible_regions` switches `do_conv_premix`,
+and with it `gentle_mixing`'s premixing, off for the rest of the run. Details and inlist
+guidance in `gentle_mixing/docs/index.md`.
+
 ## 7. Tests
 
 ```
