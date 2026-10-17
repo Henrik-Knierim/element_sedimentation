@@ -98,6 +98,14 @@ methods with the Saturn example, removal of the old implementations.
   filling to the cap, and the instant methods ignoring the velocity; the remaining
   documented deviations from the solver are listed in `docs/index.md`, section 8.
 
+### Convective premixing (2026-10-17)
+- Once the module acts, convective premixing (`do_conv_premix`, or the premixing of
+  `gentle_mixing` in its place) is switched off for the rest of the run with a one-time
+  warning, because it runs before the hook in every step and would mix the rained-out
+  layer back into the envelope. `element_sedimentation_disable_conv_premix = .false.`
+  keeps it on (the warning is still printed). Before, this happened only in the
+  `suppress_mixing_in_immiscible_regions` branch.
+
 ### Installer shared with gentle_mixing (2026-10-16)
 - `setup.py` now records the blocks it inserted into each MESA file
   (`backup/<file>.applied.json`) and removes exactly those on uninstall, located by

@@ -21,6 +21,7 @@
          real(dp) :: element_sedimentation_retry_change_factor
          integer :: element_sedimentation_cell_threshold_for_precipitation
          logical :: element_sedimentation_suppress_mixing_in_immiscible_regions
+         logical :: element_sedimentation_disable_conv_premix
          logical :: element_sedimentation_replace_mesa_mixing
          logical :: element_sedimentation_overturn_unstable_layers
          logical :: element_sedimentation_act_on_mixing_contrast

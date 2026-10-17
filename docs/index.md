@@ -309,7 +309,8 @@ less than `1e-8` relative.
 | `element_sedimentation_maximum_dXi_per_cell` | `-1d0` | ceiling on the change of $X_i$ caused by rain per cell and step, relative to the mixing-only state (off if negative) |
 | `element_sedimentation_retry_change_factor` | `0.5d0` | on a MESA retry of the same model, limit the change per cell to this factor times the previous attempt's largest change (off if <= 0) |
 | `element_sedimentation_cell_threshold_for_precipitation` | `1` | minimum number of saturated cells (at or above the He-poor limit) for the module to act |
-| `element_sedimentation_suppress_mixing_in_immiscible_regions` | `.false.` | zero `D_mix`/`sig` around cells in the gap; disables `do_conv_premix` (only used if `element_sedimentation_replace_mesa_mixing` is false) |
+| `element_sedimentation_suppress_mixing_in_immiscible_regions` | `.false.` | zero `D_mix`/`sig` around cells in the gap (only used if `element_sedimentation_replace_mesa_mixing` is false) |
+| `element_sedimentation_disable_conv_premix` | `.true.` | once the module acts, set `do_conv_premix = .false.` for the rest of the run (premixing runs before the hook in every step and would remix the rained-out layer); a one-time warning is printed either way |
 | `element_sedimentation_replace_mesa_mixing` | `.true.` | in steps where the module acts, set `D_mix` and `sig` to zero after its transport (MESA's mixing would undo the rain) |
 | `element_sedimentation_overturn_unstable_layers` | `.true.` | mix layers the transport leaves Ledoux-unstable (heavy deposit on lighter material) at once, every species mass-weighted |
 | `element_sedimentation_act_on_mixing_contrast` | `.true.` | also act (mixing only, with the energy terms) in steps where a mixed face separates cells of different species mass fraction; MESA's mixing carries no enthalpy flux |
@@ -396,10 +397,10 @@ by the full `install`; use that if you need them.
 With `gentle_mixing` installed as well, both extensions can be switched on in one run. Its
 convective premixing runs before the sedimentation transport in every step, the rain is not
 counted by its mean-square-displacement limiter (MESA resets `xa_start` after this hook),
-its damping of `mix_factor` does not reach the transport (which uses `D_mix`), and
-`element_sedimentation_suppress_mixing_in_immiscible_regions` switches `do_conv_premix`,
-and with it `gentle_mixing`'s premixing, off for the rest of the run. Details and inlist
-guidance in `gentle_mixing/docs/index.md`.
+its damping of `mix_factor` does not reach the transport (which uses `D_mix`), and once
+the module acts it switches `do_conv_premix`, and with it `gentle_mixing`'s premixing, off
+for the rest of the run with a warning (`element_sedimentation_disable_conv_premix`).
+Details and inlist guidance in `gentle_mixing/docs/index.md`.
 
 ## 7. Tests
 

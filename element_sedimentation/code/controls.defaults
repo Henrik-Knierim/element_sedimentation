@@ -272,13 +272,29 @@
 
       ! If true, MESA's mixing coefficients (``D_mix`` and ``sig``) are set to zero on
       ! both faces of every cell that was inside the immiscibility gap before the
-      ! transport, for the rest of the step. Also sets ``do_conv_premix = .false.``.
+      ! transport, for the rest of the step.
       ! Only used if ``element_sedimentation_replace_mesa_mixing = .false.`` (which switches
       ! off all of MESA's composition mixing in the steps in which the module acts).
 
       ! ::
 
     element_sedimentation_suppress_mixing_in_immiscible_regions = .false.
+
+      ! element_sedimentation_disable_conv_premix
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! Convective premixing (``do_conv_premix``, or the premixing of the ``gentle_mixing``
+      ! extension in its place) runs before this module in every step and extends a
+      ! convective region into the cells beyond its boundary as long as the mixed state is
+      ! still unstable, so it would mix the rained-out layer back into the envelope step
+      ! after step. If true, ``do_conv_premix`` is set to false for the rest of the run at
+      ! the first step in which the module acts (rain, or the mixing takeover of
+      ! ``element_sedimentation_act_on_mixing_contrast``), with a one-time warning. If
+      ! false, only the warning is printed and premixing stays on.
+
+      ! ::
+
+    element_sedimentation_disable_conv_premix = .true.
 
       ! element_sedimentation_replace_mesa_mixing
       ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -686,6 +686,29 @@ contains
          end if
       end do
 
+      ! --- convective premixing: it runs before this hook in every step (MESA's
+      ! do_conv_premix, or the premixing of the gentle_mixing extension in its place) and
+      ! homogenizes a convective region with the cells beyond its boundary as long as the
+      ! mixed state is still unstable, so it would mix the rained-out layer back into the
+      ! envelope step after step. Once the module acts it is therefore switched off for the
+      ! rest of the run (element_sedimentation_disable_conv_premix), with a one-time notice.
+      if (s% do_conv_premix) then
+         if (.not. conv_premix_notice_printed) then
+            write(*,'(a)') ' element_sedimentation: WARNING: convective premixing (do_conv_premix) is on while ' // &
+               'element sedimentation acts.'
+            write(*,'(a)') '    Premixing runs before this hook in every step and would mix the rained-out layer back.'
+            if (s% element_sedimentation_disable_conv_premix) then
+               write(*,'(a)') '    do_conv_premix is set to .false. for the rest of the run (this also switches off the'
+               write(*,'(a)') '    premixing of the gentle_mixing extension, if installed); set'
+               write(*,'(a)') '    element_sedimentation_disable_conv_premix = .false. to keep it.'
+            else
+               write(*,'(a)') '    It stays on (element_sedimentation_disable_conv_premix = .false.).'
+            end if
+            conv_premix_notice_printed = .true.
+         end if
+         if (s% element_sedimentation_disable_conv_premix) s% do_conv_premix = .false.
+      end if
+
       ! --- MESA's composition mixing for the rest of the step: the transport above already
       ! mixed every species with D_mix together with the rain, so switch MESA's mixing off.
       ! D_mix is not recomputed within the step after this hook (okay_to_set_mixing_info is
@@ -696,17 +719,6 @@ contains
          s% sig(1:nz) = 0d0
       else if (s% element_sedimentation_suppress_mixing_in_immiscible_regions) then
          ! --- optionally switch off MESA's mixing where the mixture is immiscible
-         if (s% do_conv_premix) then
-            if (.not. conv_premix_notice_printed) then
-               write(*,'(a)') ' element_sedimentation: WARNING: convective premixing and element sedimentation ' // &
-                  'with suppressed mixing are both on.'
-               write(*,'(a)') '    Regions that rain out would flip-flop between homogeneous and rained-out mixing,'
-               write(*,'(a)') '    so do_conv_premix is set to .false. for the rest of the run (this also switches off'
-               write(*,'(a)') '    the convective premixing of the gentle_mixing extension, if installed).'
-               conv_premix_notice_printed = .true.
-            end if
-            s% do_conv_premix = .false.
-         end if
          do k = 1, nz
             if (.not. in_gap(k)) cycle
             s% D_mix(k) = 0d0

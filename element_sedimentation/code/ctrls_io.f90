@@ -20,6 +20,7 @@
     element_sedimentation_retry_change_factor, &
     element_sedimentation_cell_threshold_for_precipitation, &
     element_sedimentation_suppress_mixing_in_immiscible_regions, &
+    element_sedimentation_disable_conv_premix, &
     element_sedimentation_replace_mesa_mixing, &
     element_sedimentation_overturn_unstable_layers, &
     element_sedimentation_act_on_mixing_contrast, &
@@ -50,6 +51,7 @@
  s% element_sedimentation_retry_change_factor = element_sedimentation_retry_change_factor
  s% element_sedimentation_cell_threshold_for_precipitation = element_sedimentation_cell_threshold_for_precipitation
  s% element_sedimentation_suppress_mixing_in_immiscible_regions = element_sedimentation_suppress_mixing_in_immiscible_regions
+ s% element_sedimentation_disable_conv_premix = element_sedimentation_disable_conv_premix
  s% element_sedimentation_replace_mesa_mixing = element_sedimentation_replace_mesa_mixing
  s% element_sedimentation_overturn_unstable_layers = element_sedimentation_overturn_unstable_layers
  s% element_sedimentation_act_on_mixing_contrast = element_sedimentation_act_on_mixing_contrast
@@ -80,6 +82,7 @@
  element_sedimentation_retry_change_factor = s% element_sedimentation_retry_change_factor
  element_sedimentation_cell_threshold_for_precipitation = s% element_sedimentation_cell_threshold_for_precipitation
  element_sedimentation_suppress_mixing_in_immiscible_regions = s% element_sedimentation_suppress_mixing_in_immiscible_regions
+ element_sedimentation_disable_conv_premix = s% element_sedimentation_disable_conv_premix
  element_sedimentation_replace_mesa_mixing = s% element_sedimentation_replace_mesa_mixing
  element_sedimentation_overturn_unstable_layers = s% element_sedimentation_overturn_unstable_layers
  element_sedimentation_act_on_mixing_contrast = s% element_sedimentation_act_on_mixing_contrast
